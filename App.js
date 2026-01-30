@@ -3,7 +3,7 @@ import cors from "cors";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { pool } from "./config/db.js"; // only for login users table
-import { getPool } from "./dbManager.js";
+import { getPool } from "./config/dbManager.js";
 
 dotenv.config();
 
