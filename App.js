@@ -92,7 +92,7 @@ app.get("/employee", async (req, res) => {
   }
 });
 
-// Get rota by employee name + lastName
+// Get current week's rota by employee name + lastName
 app.get("/rota", async (req, res) => {
   const { db, name, lastName } = req.query;
   if (!db || !name || !lastName)
@@ -101,17 +101,29 @@ app.get("/rota", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    const [rows] = await pool.query(
-      "SELECT name, lastName, day, startTime, endTime FROM rota WHERE name = ? AND lastName = ? ORDER BY STR_TO_DATE(day, '%d/%m/%Y')",
-      [name, lastName]
-    );
+    // MySQL: STR_TO_DATE(day, '%d/%m/%Y') converts dd/mm/yyyy to DATE
+    // WEEKDAY() gives 0=Monday ... 6=Sunday
+    // CURDATE() is today
+    // Compute Monday and Sunday of current week
+    const query = `
+      SELECT name, lastName, day, startTime, endTime
+      FROM rota
+      WHERE name = ? AND lastName = ?
+        AND STR_TO_DATE(day, '%d/%m/%Y') BETWEEN
+            DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY)
+            AND DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 6 DAY)
+      ORDER BY STR_TO_DATE(day, '%d/%m/%Y')
+    `;
 
-    return res.json(rows); // already array of objects
+    const [rows] = await pool.query(query, [name, lastName]);
+
+    return res.json(rows);
   } catch (err) {
-    console.error("Error fetching rota:", err);
+    console.error("Error fetching current week rota:", err);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
