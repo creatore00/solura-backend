@@ -3,7 +3,7 @@ import mysql from "mysql2/promise";
 import cors from "cors";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
-import { pool } from "./backend/config/db.js";  // <- use our new config
+import { pool } from "./config/db.js";  // <- use our new config
 
 dotenv.config();
 
