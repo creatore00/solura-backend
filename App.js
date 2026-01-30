@@ -124,6 +124,42 @@ app.get("/rota", async (req, res) => {
   }
 });
 
+// Get confirmed rota with optional month/year filter
+app.get("/confirmedRota", async (req, res) => {
+  const { db, name, lastName, month, year } = req.query;
+
+  if (!db || !name || !lastName)
+    return res.status(400).json({ success: false, message: "Database, name, and lastName required" });
+
+  try {
+    const pool = getPool(db); // get selected database pool
+
+    let query = `
+      SELECT name, lastName, day, startTime, endTime
+      FROM ConfirmedRota
+      WHERE name = ? AND lastName = ?
+    `;
+    const params = [name, lastName];
+
+    if (month && year) {
+      query += `
+        AND MONTH(STR_TO_DATE(day, '%d/%m/%Y')) = ?
+        AND YEAR(STR_TO_DATE(day, '%d/%m/%Y')) = ?
+      `;
+      params.push(parseInt(month), parseInt(year));
+    }
+
+    query += ` ORDER BY STR_TO_DATE(day, '%d/%m/%Y')`;
+
+    const [rows] = await pool.query(query, params);
+
+    return res.json(rows);
+  } catch (err) {
+    console.error("Error fetching confirmed rota:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
