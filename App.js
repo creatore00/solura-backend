@@ -68,5 +68,50 @@ app.post("/select-database", async (req, res) => {
   }
 });
 
+// Get employee info by email
+app.get("/employee", async (req, res) => {
+  const { email, db } = req.query;
+  if (!email || !db) return res.status(400).json({ success: false, message: "Email and db required" });
+
+  try {
+    const pool = getPool(db); // get the selected database connection
+    const [rows] = await pool.query(
+      "SELECT name, lastName FROM Employees WHERE email = ?",
+      [email]
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Employee not found" });
+    }
+
+    const employee = rows[0];
+    return res.json({ success: true, name: employee.name, lastName: employee.lastName });
+  } catch (err) {
+    console.error("Error fetching employee:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Get rota by employee name + lastName
+app.get("/rota", async (req, res) => {
+  const { db, name, lastName } = req.query;
+  if (!db || !name || !lastName)
+    return res.status(400).json({ success: false, message: "Database, name, and lastName required" });
+
+  try {
+    const pool = getPool(db);
+
+    const [rows] = await pool.query(
+      "SELECT name, lastName, day, startTime, endTime FROM rota WHERE name = ? AND lastName = ? ORDER BY STR_TO_DATE(day, '%d/%m/%Y')",
+      [name, lastName]
+    );
+
+    return res.json(rows); // already array of objects
+  } catch (err) {
+    console.error("Error fetching rota:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
