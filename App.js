@@ -3,29 +3,14 @@ import mysql from "mysql2/promise";
 import cors from "cors";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
+import { pool } from "./backend/config/db.js";  // <- use our new config
 
 dotenv.config();
 
 const app = express();
 
-/**
- * CORS:
- * Flutter mobile is not restricted like browser,
- * but keeping cors enabled is good for web too.
- */
 app.use(cors());
 app.use(express.json());
-
-// MySQL pool
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-});
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -109,10 +94,6 @@ app.post("/login", async (req, res) => {
   }
 });
 
-/**
- * Render requires PORT from env:
- * process.env.PORT
- */
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
