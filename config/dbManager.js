@@ -1,6 +1,6 @@
 // backend/dbManager.js
 import mysql from "mysql2/promise";
-import { databasesConfig } from "./config/db.js";
+import { databasesConfig } from "./db.js";
 
 const poolMap = {};
 
