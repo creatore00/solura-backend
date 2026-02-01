@@ -435,7 +435,47 @@ app.post("/save-shift", async (req, res) => {
   }
 });
 
-// Delete a specific shift
+// Delete a specific shift - handle both POST and DELETE methods
+app.post("/delete-shift", async (req, res) => {
+  const { db, entryId } = req.body;
+  
+  if (!db || !entryId) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Database and entryId are required" 
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    const [result] = await pool.query(
+      `DELETE FROM rota WHERE id = ?`,
+      [entryId]
+    );
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Shift not found" 
+      });
+    }
+    
+    return res.json({ 
+      success: true, 
+      message: "Shift deleted successfully" 
+    });
+    
+  } catch (err) {
+    console.error("Error deleting shift:", err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Server error deleting shift" 
+    });
+  }
+});
+
+// Also keep the DELETE method for REST compatibility
 app.delete("/delete-shift", async (req, res) => {
   const { db, entryId } = req.body;
   
