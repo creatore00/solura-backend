@@ -290,18 +290,20 @@ app.post("/save-shift", async (req, res) => {
       });
     }
     
-    // Validate endTime > startTime
-    const [startHour, startMin] = startTime.split(':').map(Number);
-    const [endHour, endMin] = endTime.split(':').map(Number);
-    const startTotal = startHour * 60 + startMin;
-    const endTotal = endHour * 60 + endMin;
-    
-    if (endTotal <= startTotal) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "End time must be after start time" 
-      });
-    }
+const [startHour, startMin] = startTime.split(':').map(Number);
+const [endHour, endMin] = endTime.split(':').map(Number);
+
+// Only validate that times are within valid ranges
+if (startHour < 0 || startHour > 23 || startMin < 0 || startMin > 59 ||
+    endHour < 0 || endHour > 23 || endMin < 0 || endMin > 59) {
+  return res.status(400).json({ 
+    success: false, 
+    message: "Times must be valid (HH: 0-23, MM: 0-59)" 
+  });
+}
+
+// Allow any combination - overnight shifts are valid
+// The frontend will calculate duration correctly
     
     const pool = getPool(db);
     
@@ -394,17 +396,22 @@ app.post("/add-another-shift", async (req, res) => {
     }
     
     // Validate endTime > startTime
-    const [startHour, startMin] = startTime.split(':').map(Number);
-    const [endHour, endMin] = endTime.split(':').map(Number);
-    const startTotal = startHour * 60 + startMin;
-    const endTotal = endHour * 60 + endMin;
-    
-    if (endTotal <= startTotal) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "End time must be after start time" 
-      });
-    }
+// Validate time format only, don't validate chronological order
+// This allows overnight shifts like 22:55 - 00:55
+const [startHour, startMin] = startTime.split(':').map(Number);
+const [endHour, endMin] = endTime.split(':').map(Number);
+
+// Only validate that times are within valid ranges
+if (startHour < 0 || startHour > 23 || startMin < 0 || startMin > 59 ||
+    endHour < 0 || endHour > 23 || endMin < 0 || endMin > 59) {
+  return res.status(400).json({ 
+    success: false, 
+    message: "Times must be valid (HH: 0-23, MM: 0-59)" 
+  });
+}
+
+// Allow any combination - overnight shifts are valid
+// The frontend will calculate duration correctly
     
     const pool = getPool(db);
     
@@ -450,13 +457,6 @@ app.post("/add-another-shift", async (req, res) => {
     if (existingShifts.length === 1) {
       const existing = existingShifts[0];
       const existingEnd = existing.endTime.substring(0, 5); // HH:mm
-      // Ensure shifts are in chronological order
-      if (startTime < existingEnd) {
-        return res.status(400).json({ 
-          success: false, 
-          message: "New shift must start after existing shift ends" 
-        });
-      }
     }
     
     // Generate unique code
