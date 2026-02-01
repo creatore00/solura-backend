@@ -19,6 +19,18 @@ function generateUniqueCode() {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// Helper function to ensure time has seconds
+function ensureTimeWithSeconds(time) {
+  if (!time) return '00:00:00';
+  if (time.includes(':')) {
+    const parts = time.split(':');
+    if (parts.length === 2) {
+      return time + ':00'; // Add seconds if missing
+    }
+  }
+  return time;
+}
+
 // Health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok", message: "Solura backend is running" });
@@ -82,7 +94,7 @@ app.get("/employee", async (req, res) => {
   if (!email || !db) return res.status(400).json({ success: false, message: "Email and db required" });
 
   try {
-    const pool = getPool(db); // get the selected database connection
+    const pool = getPool(db);
     const [rows] = await pool.query(
       "SELECT name, lastName, wage, designation FROM Employees WHERE email = ?",
       [email]
@@ -97,8 +109,8 @@ app.get("/employee", async (req, res) => {
       success: true, 
       name: employee.name, 
       lastName: employee.lastName,
-      wage: employee.wage || 0,
-      designation: employee.designation || ''
+      wage: employee.wage,
+      designation: employee.designation
     });
   } catch (err) {
     console.error("Error fetching employee:", err);
@@ -122,12 +134,19 @@ app.get("/rota", async (req, res) => {
         AND STR_TO_DATE(day, '%d/%m/%Y') BETWEEN
             DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY)
             AND DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 6 DAY)
-      ORDER BY STR_TO_DATE(day, '%d/%m/%Y')
+      ORDER BY STR_TO_DATE(day, '%d/%m/%Y'), startTime
     `;
 
     const [rows] = await pool.query(query, [name, lastName]);
 
-    return res.json(rows);
+    // Remove seconds from times for frontend display
+    const formattedRows = rows.map(row => ({
+      ...row,
+      startTime: row.startTime ? row.startTime.substring(0, 5) : '', // HH:mm
+      endTime: row.endTime ? row.endTime.substring(0, 5) : '' // HH:mm
+    }));
+
+    return res.json(formattedRows);
   } catch (err) {
     console.error("Error fetching current week rota:", err);
     return res.status(500).json({ success: false, message: "Server error" });
@@ -159,11 +178,18 @@ app.get("/confirmedRota", async (req, res) => {
       params.push(parseInt(month), parseInt(year));
     }
 
-    query += ` ORDER BY STR_TO_DATE(day, '%d/%m/%Y')`;
+    query += ` ORDER BY STR_TO_DATE(day, '%d/%m/%Y'), startTime`;
 
     const [rows] = await pool.query(query, params);
 
-    return res.json(rows);
+    // Remove seconds from times for frontend display
+    const formattedRows = rows.map(row => ({
+      ...row,
+      startTime: row.startTime ? row.startTime.substring(0, 5) : '',
+      endTime: row.endTime ? row.endTime.substring(0, 5) : ''
+    }));
+
+    return res.json(formattedRows);
   } catch (err) {
     console.error("Error fetching confirmed rota:", err);
     return res.status(500).json({ success: false, message: "Server error" });
@@ -215,11 +241,23 @@ app.get("/today-shifts", async (req, res) => {
       [name, lastName, day]
     );
     
+    // Remove seconds from times for frontend display
+    const formattedShifts = shiftRows.map(shift => ({
+      ...shift,
+      startTime: shift.startTime ? shift.startTime.substring(0, 5) : '',
+      endTime: shift.endTime ? shift.endTime.substring(0, 5) : ''
+    }));
+    
     return res.json({
       success: true,
-      employee: { name, lastName, wage, designation },
+      employee: { 
+        name, 
+        lastName, 
+        wage: wage ? parseFloat(wage) : 0,
+        designation: designation || ''
+      },
       today: day,
-      shifts: shiftRows
+      shifts: formattedShifts
     });
     
   } catch (err) {
@@ -274,15 +312,6 @@ app.post("/save-shift", async (req, res) => {
       [name, lastName, day]
     );
     
-    if (existingShifts.length > 0) {
-      // Update existing shift(s)
-      // Delete existing shifts for today first (to prevent duplicates)
-      await pool.query(
-        `DELETE FROM rota WHERE name = ? AND lastName = ? AND day = ?`,
-        [name, lastName, day]
-      );
-    }
-    
     // Generate unique code and ensure it doesn't exist
     let uniqueId;
     let codeExists = true;
@@ -305,16 +334,32 @@ app.post("/save-shift", async (req, res) => {
       });
     }
     
-    // Insert new shift with unique ID, wage, and designation
-    await pool.query(
-      `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [uniqueId, name, lastName, day, startTime, endTime, wage || 0, designation || '']
-    );
+    // Add seconds to times for database storage
+    const startTimeWithSeconds = ensureTimeWithSeconds(startTime);
+    const endTimeWithSeconds = ensureTimeWithSeconds(endTime);
+    
+    if (existingShifts.length > 0) {
+      // Update existing shift
+      await pool.query(
+        `UPDATE rota 
+         SET startTime = ?, endTime = ?, wage = ?, designation = ?
+         WHERE name = ? AND lastName = ? AND day = ?`,
+        [startTimeWithSeconds, endTimeWithSeconds, wage || 0, designation || '', 
+         name, lastName, day]
+      );
+    } else {
+      // Insert new shift with unique ID
+      await pool.query(
+        `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [uniqueId, name, lastName, day, startTimeWithSeconds, endTimeWithSeconds, 
+         wage || 0, designation || '']
+      );
+    }
     
     return res.json({ 
       success: true, 
-      message: "Shift saved successfully",
+      message: existingShifts.length > 0 ? "Shift updated successfully" : "Shift saved successfully",
       id: uniqueId 
     });
     
@@ -385,11 +430,14 @@ app.post("/add-another-shift", async (req, res) => {
       [name, lastName, day]
     );
     
-    // Check overlaps with existing shifts
+    // Check overlaps with existing shifts (comparing without seconds)
     for (const existing of existingShifts) {
+      const existingStart = existing.startTime.substring(0, 5); // HH:mm
+      const existingEnd = existing.endTime.substring(0, 5); // HH:mm
+      
       if (
-        (startTime < existing.endTime && endTime > existing.startTime) ||
-        (endTime > existing.startTime && startTime < existing.endTime)
+        (startTime < existingEnd && endTime > existingStart) ||
+        (endTime > existingStart && startTime < existingEnd)
       ) {
         return res.status(400).json({ 
           success: false, 
@@ -401,8 +449,9 @@ app.post("/add-another-shift", async (req, res) => {
     // Check chronological order if there's an existing shift
     if (existingShifts.length === 1) {
       const existing = existingShifts[0];
+      const existingEnd = existing.endTime.substring(0, 5); // HH:mm
       // Ensure shifts are in chronological order
-      if (startTime < existing.endTime) {
+      if (startTime < existingEnd) {
         return res.status(400).json({ 
           success: false, 
           message: "New shift must start after existing shift ends" 
@@ -432,11 +481,16 @@ app.post("/add-another-shift", async (req, res) => {
       });
     }
     
+    // Add seconds to times for database storage
+    const startTimeWithSeconds = ensureTimeWithSeconds(startTime);
+    const endTimeWithSeconds = ensureTimeWithSeconds(endTime);
+    
     // Insert new shift
     await pool.query(
       `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation) 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [uniqueId, name, lastName, day, startTime, endTime, wage || 0, designation || '']
+      [uniqueId, name, lastName, day, startTimeWithSeconds, endTimeWithSeconds, 
+       wage || 0, designation || '']
     );
     
     return res.json({ 
