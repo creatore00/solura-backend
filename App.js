@@ -269,9 +269,9 @@ app.get("/today-shifts", async (req, res) => {
   }
 });
 
-// Create or update a shift for today
+// Save or update a specific shift
 app.post("/save-shift", async (req, res) => {
-  const { db, name, lastName, day, startTime, endTime, wage, designation } = req.body;
+  const { db, entryId, name, lastName, day, startTime, endTime, wage, designation } = req.body;
   
   if (!db || !name || !lastName || !day || !startTime || !endTime) {
     return res.status(400).json({ 
@@ -290,86 +290,187 @@ app.post("/save-shift", async (req, res) => {
       });
     }
     
-const [startHour, startMin] = startTime.split(':').map(Number);
-const [endHour, endMin] = endTime.split(':').map(Number);
+    const [startHour, startMin] = startTime.split(':').map(Number);
+    const [endHour, endMin] = endTime.split(':').map(Number);
 
-// Only validate that times are within valid ranges
-if (startHour < 0 || startHour > 23 || startMin < 0 || startMin > 59 ||
-    endHour < 0 || endHour > 23 || endMin < 0 || endMin > 59) {
-  return res.status(400).json({ 
-    success: false, 
-    message: "Times must be valid (HH: 0-23, MM: 0-59)" 
-  });
-}
-
-// Allow any combination - overnight shifts are valid
-// The frontend will calculate duration correctly
+    // Validate time ranges
+    if (startHour < 0 || startHour > 23 || startMin < 0 || startMin > 59 ||
+        endHour < 0 || endHour > 23 || endMin < 0 || endMin > 59) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Times must be valid (HH: 0-23, MM: 0-59)" 
+      });
+    }
     
     const pool = getPool(db);
     
-    // Check if shift already exists for today
+    // Check for overlapping shifts (excluding the current shift if updating)
     const [existingShifts] = await pool.query(
-      `SELECT id FROM rota 
+      `SELECT id, startTime, endTime FROM rota 
        WHERE name = ? AND lastName = ? AND day = ?`,
       [name, lastName, day]
     );
     
-    // Generate unique code and ensure it doesn't exist
-    let uniqueId;
-    let codeExists = true;
-    let attempts = 0;
+    // Convert new shift times to minutes for comparison
+    const newStartMin = startHour * 60 + startMin;
+    const newEndMin = endHour * 60 + endMin;
     
-    while (codeExists && attempts < 10) {
-      uniqueId = generateUniqueCode();
-      const [existingCode] = await pool.query(
-        `SELECT id FROM rota WHERE id = ?`,
-        [uniqueId]
-      );
-      codeExists = existingCode.length > 0;
-      attempts++;
-    }
-    
-    if (codeExists) {
-      return res.status(500).json({ 
-        success: false, 
-        message: "Could not generate unique shift code" 
-      });
+    // Check for overlaps with other shifts
+    for (const existing of existingShifts) {
+      // Skip the shift we're updating (if entryId is provided)
+      if (entryId && existing.id == entryId) continue;
+      
+      const existingStart = existing.startTime.substring(0, 5);
+      const existingEnd = existing.endTime.substring(0, 5);
+      
+      // Calculate total minutes for existing shift
+      const [existingStartHour, existingStartMinute] = existingStart.split(':').map(Number);
+      const [existingEndHour, existingEndMinute] = existingEnd.split(':').map(Number);
+      
+      const existingStartTotal = existingStartHour * 60 + existingStartMinute;
+      const existingEndTotal = existingEndHour * 60 + existingEndMinute;
+      
+      // Check for overlap (considering overnight shifts)
+      let overlap = false;
+      
+      // Normal case: both shifts within same day
+      if (newStartMin < newEndMin && existingStartTotal < existingEndTotal) {
+        overlap = (newStartMin < existingEndTotal && newEndMin > existingStartTotal);
+      }
+      // New shift is overnight
+      else if (newStartMin > newEndMin) {
+        const newEndMinNextDay = newEndMin + 1440; // Add 24 hours
+        if (existingStartTotal < existingEndTotal) {
+          // Existing is normal
+          overlap = (newStartMin < existingEndTotal || newEndMinNextDay > existingStartTotal);
+        } else {
+          // Existing is also overnight
+          const existingEndTotalNextDay = existingEndTotal + 1440;
+          overlap = (newStartMin < existingEndTotalNextDay && newEndMinNextDay > existingStartTotal);
+        }
+      }
+      // Existing shift is overnight
+      else if (existingStartTotal > existingEndTotal) {
+        const existingEndTotalNextDay = existingEndTotal + 1440;
+        overlap = (newStartMin < existingEndTotalNextDay && newEndMin > existingStartTotal);
+      }
+      
+      if (overlap) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "This shift overlaps with another existing shift" 
+        });
+      }
     }
     
     // Add seconds to times for database storage
     const startTimeWithSeconds = ensureTimeWithSeconds(startTime);
     const endTimeWithSeconds = ensureTimeWithSeconds(endTime);
     
-    if (existingShifts.length > 0) {
+    if (entryId) {
       // Update existing shift
       await pool.query(
         `UPDATE rota 
          SET startTime = ?, endTime = ?, wage = ?, designation = ?
-         WHERE name = ? AND lastName = ? AND day = ?`,
-        [startTimeWithSeconds, endTimeWithSeconds, wage || 0, designation || '', 
-         name, lastName, day]
+         WHERE id = ?`,
+        [startTimeWithSeconds, endTimeWithSeconds, wage || 0, designation || '', entryId]
       );
+      
+      return res.json({ 
+        success: true, 
+        message: "Shift updated successfully",
+        entryId: entryId
+      });
     } else {
+      // Check how many shifts already exist for this employee today (max 2)
+      if (existingShifts.length >= 2) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Maximum 2 shifts per day already exist" 
+        });
+      }
+      
       // Insert new shift with unique ID
+      let uniqueId;
+      let codeExists = true;
+      let attempts = 0;
+      
+      while (codeExists && attempts < 10) {
+        uniqueId = generateUniqueCode();
+        const [existingCode] = await pool.query(
+          `SELECT id FROM rota WHERE id = ?`,
+          [uniqueId]
+        );
+        codeExists = existingCode.length > 0;
+        attempts++;
+      }
+      
+      if (codeExists) {
+        return res.status(500).json({ 
+          success: false, 
+          message: "Could not generate unique shift code" 
+        });
+      }
+      
       await pool.query(
         `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [uniqueId, name, lastName, day, startTimeWithSeconds, endTimeWithSeconds, 
          wage || 0, designation || '']
       );
+      
+      return res.json({ 
+        success: true, 
+        message: "Shift saved successfully",
+        entryId: uniqueId
+      });
     }
-    
-    return res.json({ 
-      success: true, 
-      message: existingShifts.length > 0 ? "Shift updated successfully" : "Shift saved successfully",
-      id: uniqueId 
-    });
     
   } catch (err) {
     console.error("Error saving shift:", err);
     return res.status(500).json({ 
       success: false, 
       message: "Server error saving shift" 
+    });
+  }
+});
+
+// Delete a specific shift
+app.delete("/delete-shift", async (req, res) => {
+  const { db, entryId } = req.body;
+  
+  if (!db || !entryId) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Database and entryId are required" 
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    const [result] = await pool.query(
+      `DELETE FROM rota WHERE id = ?`,
+      [entryId]
+    );
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Shift not found" 
+      });
+    }
+    
+    return res.json({ 
+      success: true, 
+      message: "Shift deleted successfully" 
+    });
+    
+  } catch (err) {
+    console.error("Error deleting shift:", err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Server error deleting shift" 
     });
   }
 });
