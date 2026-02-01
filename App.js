@@ -11,6 +11,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Helper function to generate unique 16-digit code
+function generateUniqueCode() {
+  // Generate 16-digit number
+  const min = 1000000000000000; // 10^15
+  const max = 9999999999999999; // 10^16 - 1
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
 // Health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok", message: "Solura backend is running" });
@@ -68,7 +76,7 @@ app.post("/select-database", async (req, res) => {
   }
 });
 
-// Get employee info by email
+// Get employee info by email (now includes wage and designation)
 app.get("/employee", async (req, res) => {
   const { email, db } = req.query;
   if (!email || !db) return res.status(400).json({ success: false, message: "Email and db required" });
@@ -76,7 +84,7 @@ app.get("/employee", async (req, res) => {
   try {
     const pool = getPool(db); // get the selected database connection
     const [rows] = await pool.query(
-      "SELECT name, lastName FROM Employees WHERE email = ?",
+      "SELECT name, lastName, wage, designation FROM Employees WHERE email = ?",
       [email]
     );
 
@@ -85,7 +93,13 @@ app.get("/employee", async (req, res) => {
     }
 
     const employee = rows[0];
-    return res.json({ success: true, name: employee.name, lastName: employee.lastName });
+    return res.json({ 
+      success: true, 
+      name: employee.name, 
+      lastName: employee.lastName,
+      wage: employee.wage || 0,
+      designation: employee.designation || ''
+    });
   } catch (err) {
     console.error("Error fetching employee:", err);
     return res.status(500).json({ success: false, message: "Server error" });
@@ -101,12 +115,8 @@ app.get("/rota", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    // MySQL: STR_TO_DATE(day, '%d/%m/%Y') converts dd/mm/yyyy to DATE
-    // WEEKDAY() gives 0=Monday ... 6=Sunday
-    // CURDATE() is today
-    // Compute Monday and Sunday of current week
     const query = `
-      SELECT name, lastName, day, startTime, endTime
+      SELECT id, name, lastName, day, startTime, endTime, designation, wage
       FROM rota
       WHERE name = ? AND lastName = ?
         AND STR_TO_DATE(day, '%d/%m/%Y') BETWEEN
@@ -132,10 +142,10 @@ app.get("/confirmedRota", async (req, res) => {
     return res.status(400).json({ success: false, message: "Database, name, and lastName required" });
 
   try {
-    const pool = getPool(db); // get selected database pool
+    const pool = getPool(db);
 
     let query = `
-      SELECT name, lastName, day, startTime, endTime
+      SELECT id, name, lastName, day, startTime, endTime, designation, wage
       FROM ConfirmedRota
       WHERE name = ? AND lastName = ?
     `;
@@ -160,8 +170,6 @@ app.get("/confirmedRota", async (req, res) => {
   }
 });
 
-// ========== NEW ENDPOINTS FOR SHIFT TIME MANAGEMENT ==========
-
 // Get today's shifts for an employee
 app.get("/today-shifts", async (req, res) => {
   const { db, email } = req.query;
@@ -176,9 +184,9 @@ app.get("/today-shifts", async (req, res) => {
   try {
     const pool = getPool(db);
     
-    // 1. Get employee info from email
+    // 1. Get employee info from email (including wage and designation)
     const [employeeRows] = await pool.query(
-      "SELECT name, lastName FROM Employees WHERE email = ?",
+      "SELECT name, lastName, wage, designation FROM Employees WHERE email = ?",
       [email]
     );
     
@@ -190,7 +198,7 @@ app.get("/today-shifts", async (req, res) => {
     }
     
     const employee = employeeRows[0];
-    const { name, lastName } = employee;
+    const { name, lastName, wage, designation } = employee;
     
     // 2. Get today's date in dd/mm/yyyy format
     const today = new Date();
@@ -200,7 +208,7 @@ app.get("/today-shifts", async (req, res) => {
     
     // 3. Get today's shifts (max 2)
     const [shiftRows] = await pool.query(
-      `SELECT id, name, lastName, day, startTime, endTime 
+      `SELECT id, name, lastName, day, startTime, endTime, designation, wage 
        FROM rota 
        WHERE name = ? AND lastName = ? AND day = ?
        ORDER BY startTime ASC`,
@@ -209,7 +217,7 @@ app.get("/today-shifts", async (req, res) => {
     
     return res.json({
       success: true,
-      employee: { name, lastName },
+      employee: { name, lastName, wage, designation },
       today: day,
       shifts: shiftRows
     });
@@ -223,14 +231,14 @@ app.get("/today-shifts", async (req, res) => {
   }
 });
 
-// Update an existing shift
-app.put("/update-shift", async (req, res) => {
-  const { db, id, startTime, endTime } = req.body;
+// Create or update a shift for today
+app.post("/save-shift", async (req, res) => {
+  const { db, name, lastName, day, startTime, endTime, wage, designation } = req.body;
   
-  if (!db || !id || !startTime || !endTime) {
+  if (!db || !name || !lastName || !day || !startTime || !endTime) {
     return res.status(400).json({ 
       success: false, 
-      message: "Database, shift ID, startTime, and endTime are required" 
+      message: "Database, name, lastName, day, startTime, and endTime are required" 
     });
   }
 
@@ -259,68 +267,69 @@ app.put("/update-shift", async (req, res) => {
     
     const pool = getPool(db);
     
-    // Get the shift to check for overlaps
-    const [shiftRows] = await pool.query(
-      `SELECT name, lastName, day FROM rota WHERE id = ?`,
-      [id]
-    );
-    
-    if (!shiftRows || shiftRows.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Shift not found" 
-      });
-    }
-    
-    const shift = shiftRows[0];
-    
-    // Check for overlaps with other shifts on same day
-    const [overlapRows] = await pool.query(
+    // Check if shift already exists for today
+    const [existingShifts] = await pool.query(
       `SELECT id FROM rota 
-       WHERE name = ? AND lastName = ? AND day = ? AND id != ?
-         AND (
-           (? < endTime AND ? > startTime) OR
-           (? < endTime AND ? > startTime) OR
-           (? <= startTime AND ? >= endTime)
-         )`,
-      [
-        shift.name, shift.lastName, shift.day, id,
-        startTime, startTime,
-        endTime, endTime,
-        startTime, endTime
-      ]
+       WHERE name = ? AND lastName = ? AND day = ?`,
+      [name, lastName, day]
     );
     
-    if (overlapRows.length > 0) {
-      return res.status(400).json({ 
+    if (existingShifts.length > 0) {
+      // Update existing shift(s)
+      // Delete existing shifts for today first (to prevent duplicates)
+      await pool.query(
+        `DELETE FROM rota WHERE name = ? AND lastName = ? AND day = ?`,
+        [name, lastName, day]
+      );
+    }
+    
+    // Generate unique code and ensure it doesn't exist
+    let uniqueId;
+    let codeExists = true;
+    let attempts = 0;
+    
+    while (codeExists && attempts < 10) {
+      uniqueId = generateUniqueCode();
+      const [existingCode] = await pool.query(
+        `SELECT id FROM rota WHERE id = ?`,
+        [uniqueId]
+      );
+      codeExists = existingCode.length > 0;
+      attempts++;
+    }
+    
+    if (codeExists) {
+      return res.status(500).json({ 
         success: false, 
-        message: "Shift overlaps with existing shift" 
+        message: "Could not generate unique shift code" 
       });
     }
     
-    // Update the shift
+    // Insert new shift with unique ID, wage, and designation
     await pool.query(
-      `UPDATE rota SET startTime = ?, endTime = ? WHERE id = ?`,
-      [startTime, endTime, id]
+      `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [uniqueId, name, lastName, day, startTime, endTime, wage || 0, designation || '']
     );
     
     return res.json({ 
       success: true, 
-      message: "Shift updated successfully" 
+      message: "Shift saved successfully",
+      id: uniqueId 
     });
     
   } catch (err) {
-    console.error("Error updating shift:", err);
+    console.error("Error saving shift:", err);
     return res.status(500).json({ 
       success: false, 
-      message: "Server error updating shift" 
+      message: "Server error saving shift" 
     });
   }
 });
 
-// Add a new shift for today (for breaks)
-app.post("/add-shift", async (req, res) => {
-  const { db, name, lastName, day, startTime, endTime } = req.body;
+// Add another shift (for breaks)
+app.post("/add-another-shift", async (req, res) => {
+  const { db, name, lastName, day, startTime, endTime, wage, designation } = req.body;
   
   if (!db || !name || !lastName || !day || !startTime || !endTime) {
     return res.status(400).json({ 
@@ -401,17 +410,39 @@ app.post("/add-shift", async (req, res) => {
       }
     }
     
+    // Generate unique code
+    let uniqueId;
+    let codeExists = true;
+    let attempts = 0;
+    
+    while (codeExists && attempts < 10) {
+      uniqueId = generateUniqueCode();
+      const [existingCode] = await pool.query(
+        `SELECT id FROM rota WHERE id = ?`,
+        [uniqueId]
+      );
+      codeExists = existingCode.length > 0;
+      attempts++;
+    }
+    
+    if (codeExists) {
+      return res.status(500).json({ 
+        success: false, 
+        message: "Could not generate unique shift code" 
+      });
+    }
+    
     // Insert new shift
-    const [result] = await pool.query(
-      `INSERT INTO rota (name, lastName, day, startTime, endTime) 
-       VALUES (?, ?, ?, ?, ?)`,
-      [name, lastName, day, startTime, endTime]
+    await pool.query(
+      `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [uniqueId, name, lastName, day, startTime, endTime, wage || 0, designation || '']
     );
     
     return res.json({ 
       success: true, 
       message: "Shift added successfully",
-      id: result.insertId 
+      id: uniqueId 
     });
     
   } catch (err) {
@@ -419,39 +450,6 @@ app.post("/add-shift", async (req, res) => {
     return res.status(500).json({ 
       success: false, 
       message: "Server error adding shift" 
-    });
-  }
-});
-
-// Delete a shift (optional, for cleanup)
-app.delete("/delete-shift", async (req, res) => {
-  const { db, id } = req.body;
-  
-  if (!db || !id) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "Database and shift ID are required" 
-    });
-  }
-
-  try {
-    const pool = getPool(db);
-    
-    await pool.query(
-      `DELETE FROM rota WHERE id = ?`,
-      [id]
-    );
-    
-    return res.json({ 
-      success: true, 
-      message: "Shift deleted successfully" 
-    });
-    
-  } catch (err) {
-    console.error("Error deleting shift:", err);
-    return res.status(500).json({ 
-      success: false, 
-      message: "Server error deleting shift" 
     });
   }
 });
