@@ -153,6 +153,93 @@ app.get("/rota", async (req, res) => {
   }
 });
 
+// Get all rota entries for a specific week with designation
+app.get("/all-rota", async (req, res) => {
+  const { db, startDate, endDate } = req.query;
+  
+  if (!db || !startDate || !endDate) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Database, startDate, and endDate are required" 
+    });
+  }
+
+  try {
+    // Validate date format
+    const dateRegex = /^\d{2}\/\d{2}\/\d{4}$/;
+    if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Invalid date format. Use dd/mm/yyyy" 
+      });
+    }
+    
+    const pool = getPool(db);
+    
+    // Convert dates from dd/mm/yyyy to yyyy-mm-dd for SQL comparison
+    const [startDay, startMonth, startYear] = startDate.split('/');
+    const [endDay, endMonth, endYear] = endDate.split('/');
+    
+    const startDateSQL = `${startYear}-${startMonth}-${startDay}`;
+    const endDateSQL = `${endYear}-${endMonth}-${endDay}`;
+    
+    console.log(`Fetching rota from ${startDate} to ${endDate}`);
+    
+    // Query to get all rota entries with employee designation
+    // This assumes your rota table has columns: name, lastName, day, startTime, endTime
+    // And employees table has: name, lastName, designation
+    const query = `
+      SELECT 
+        r.name,
+        r.lastName,
+        r.day,
+        TIME_FORMAT(r.startTime, '%H:%i') as startTime,
+        TIME_FORMAT(r.endTime, '%H:%i') as endTime,
+        COALESCE(e.designation, 'Unknown') as designation
+      FROM rota r
+      LEFT JOIN Employees e ON r.name = e.name AND r.lastName = e.lastName
+      WHERE STR_TO_DATE(SUBSTRING_INDEX(r.day, ' (', 1), '%d/%m/%Y') 
+            BETWEEN ? AND ?
+      ORDER BY 
+        CASE WHEN COALESCE(e.designation, '') = 'BOH' THEN 1 
+             WHEN COALESCE(e.designation, '') = 'FOH' THEN 2 
+             ELSE 3 END,
+        r.lastName,
+        r.name,
+        STR_TO_DATE(SUBSTRING_INDEX(r.day, ' (', 1), '%d/%m/%Y'),
+        r.startTime
+    `;
+    
+    const [rows] = await pool.query(query, [startDateSQL, endDateSQL]);
+    
+    console.log(`Found ${rows.length} rota entries`);
+    
+    // Filter out entries with empty times and format the response
+    const formattedData = rows
+      .filter(row => row.startTime && row.endTime && row.startTime.trim() !== '' && row.endTime.trim() !== '')
+      .map(row => ({
+        name: row.name || '',
+        lastName: row.lastName || '',
+        day: row.day || '',
+        startTime: row.startTime ? row.startTime.substring(0, 5) : '', // HH:mm format
+        endTime: row.endTime ? row.endTime.substring(0, 5) : '', // HH:mm format
+        designation: row.designation || 'Unknown'
+      }));
+    
+    console.log(`Returning ${formattedData.length} valid entries`);
+    
+    return res.json(formattedData);
+    
+  } catch (err) {
+    console.error("Error fetching all rota:", err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Server error fetching rota data",
+      error: err.message 
+    });
+  }
+});
+
 // Get confirmed rota with optional month/year filter
 app.get("/confirmedRota", async (req, res) => {
   const { db, name, lastName, month, year } = req.query;
