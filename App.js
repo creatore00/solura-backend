@@ -736,5 +736,134 @@ if (startHour < 0 || startHour > 23 || startMin < 0 || startMin > 59 ||
   }
 });
 
+// Get holidays for an employee
+app.get("/holidays", async (req, res) => {
+  const { db, email, page = 1, limit = 5 } = req.query;
+  
+  if (!db || !email) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Database and email are required" 
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    // 1. Get employee info from email
+    const [employeeRows] = await pool.query(
+      "SELECT name, lastName FROM Employees WHERE email = ?",
+      [email]
+    );
+    
+    if (!employeeRows || employeeRows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Employee not found" 
+      });
+    }
+    
+    const employee = employeeRows[0];
+    const { name, lastName } = employee;
+    
+    // 2. Calculate pagination
+    const pageNumber = parseInt(page);
+    const limitNumber = parseInt(limit);
+    const offset = (pageNumber - 1) * limitNumber;
+    
+    // 3. Get total count for pagination
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) as total 
+       FROM Holiday 
+       WHERE name = ? AND lastName = ? AND accepted = 'true'`,
+      [name, lastName]
+    );
+    
+    const totalCount = countRows[0].total;
+    const totalPages = Math.ceil(totalCount / limitNumber);
+    
+    // 4. Get paginated holidays data
+    const query = `
+      SELECT 
+        name,
+        lastName,
+        startDate,
+        endDate,
+        requestDate,
+        days,
+        accepted,
+        who,
+        notes
+      FROM Holiday 
+      WHERE name = ? AND lastName = ? AND accepted = 'true'
+      ORDER BY requestDate DESC
+      LIMIT ? OFFSET ?
+    `;
+    
+    const [holidayRows] = await pool.query(query, [name, lastName, limitNumber, offset]);
+    
+    // 5. Format dates for display
+    const formattedHolidays = holidayRows.map(holiday => ({
+      name: holiday.name || '',
+      lastName: holiday.lastName || '',
+      startDate: holiday.startDate ? formatDate(holiday.startDate) : '',
+      endDate: holiday.endDate ? formatDate(holiday.endDate) : '',
+      requestDate: holiday.requestDate ? formatDate(holiday.requestDate) : '',
+      days: holiday.days || 0,
+      accepted: holiday.accepted || '',
+      who: holiday.who || '',
+      notes: holiday.notes || ''
+    }));
+    
+    return res.json({
+      success: true,
+      holidays: formattedHolidays,
+      pagination: {
+        currentPage: pageNumber,
+        totalPages: totalPages,
+        totalItems: totalCount,
+        itemsPerPage: limitNumber,
+        hasNextPage: pageNumber < totalPages,
+        hasPreviousPage: pageNumber > 1
+      }
+    });
+    
+  } catch (err) {
+    console.error("Error fetching holidays:", err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Server error fetching holidays",
+      error: err.message 
+    });
+  }
+});
+
+// Helper function to format dates
+function formatDate(dateString) {
+  if (!dateString) return '';
+  
+  try {
+    // If date is already in dd/mm/yyyy format, return as is
+    if (dateString.includes('/')) {
+      return dateString;
+    }
+    
+    // If it's a Date object or ISO string
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) {
+      return dateString; // Return original if can't parse
+    }
+    
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+    
+    return `${day}/${month}/${year}`;
+  } catch (error) {
+    console.error("Error formatting date:", error);
+    return dateString;
+  }
+}
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
