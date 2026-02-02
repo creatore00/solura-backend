@@ -792,8 +792,7 @@ app.get("/holidays", async (req, res) => {
         requestDate,
         days,
         accepted,
-        who,
-        notes
+        who
       FROM Holiday 
       WHERE name = ? AND lastName = ? AND accepted = 'true'
       ORDER BY requestDate DESC
