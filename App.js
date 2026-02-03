@@ -837,6 +837,159 @@ app.get("/holidays", async (req, res) => {
   }
 });
 
+// Request a holiday (employee)
+app.post("/holidays/request", async (req, res) => {
+  const { db, email, startDate, endDate, notes = "", type = "Paid" } = req.body;
+
+  if (!db || !email || !startDate || !endDate) {
+    return res.status(400).json({
+      success: false,
+      message: "db, email, startDate and endDate are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    // Find employee
+    const [employeeRows] = await pool.query(
+      "SELECT name, lastName FROM Employees WHERE email = ?",
+      [email]
+    );
+
+    if (!employeeRows || employeeRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found"
+      });
+    }
+
+    const employee = employeeRows[0];
+
+    // calculate days difference inclusive
+    const s = new Date(startDate);
+    const e = new Date(endDate);
+    const diff = Math.round((e - s) / (1000 * 60 * 60 * 24)) + 1;
+
+    if (diff <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid holiday period"
+      });
+    }
+
+    // accepted logic:
+    // - if unpaid -> accepted = 'unpaid'
+    // - else -> accepted = '' (pending)
+    const acceptedValue = (type.toLowerCase() === "unpaid") ? "unpaid" : "";
+
+    const requestDate = new Date();
+
+    await pool.query(
+      `INSERT INTO Holiday 
+        (name, lastName, startDate, endDate, requestDate, days, accepted, who, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        employee.name,
+        employee.lastName,
+        startDate,
+        endDate,
+        requestDate,
+        diff,
+        acceptedValue,
+        "", // ✅ who stays empty (will be filled when approved)
+        notes
+      ]
+    );
+
+    // create in-app notifications for AM/Manager
+    const title = "New Holiday Request";
+    const message = `${employee.name} ${employee.lastName} requested holiday from ${startDate} to ${endDate} (${diff} days) - ${type}`;
+
+    await pool.query(
+      `INSERT INTO Notifications (targetRole, title, message, type)
+      VALUES (?, ?, ?, ?), (?, ?, ?, ?)`,
+      [
+        "AM", title, message, "HOLIDAY",
+        "Manager", title, message, "HOLIDAY"
+      ]
+    );
+
+    return res.json({
+      success: true,
+      message: "Holiday request submitted"
+    });
+
+  } catch (err) {
+    console.error("Error requesting holiday:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error requesting holiday",
+      error: err.message
+    });
+  }
+});
+
+app.get("/notifications", async (req, res) => {
+  const { db, role } = req.query;
+
+  if (!db || !role) {
+    return res.status(400).json({
+      success: false,
+      message: "db and role are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    const [rows] = await pool.query(
+      `SELECT id, title, message, type, isRead, createdAt
+       FROM Notifications
+       WHERE targetRole = ?
+       ORDER BY createdAt DESC
+       LIMIT 50`,
+      [role]
+    );
+
+    res.json({ success: true, notifications: rows });
+  } catch (err) {
+    console.error("Error fetching notifications:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching notifications"
+    });
+  }
+});
+
+app.post("/notifications/read", async (req, res) => {
+  const { db, id } = req.body;
+
+  if (!db || !id) {
+    return res.status(400).json({
+      success: false,
+      message: "db and id are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    await pool.query(
+      "UPDATE Notifications SET isRead = 1 WHERE id = ?",
+      [id]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error marking notification read:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+});
+
 // Helper function to format dates
 function formatDate(dateString) {
   if (!dateString) return '';
