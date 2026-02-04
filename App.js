@@ -952,7 +952,7 @@ app.get("/holidays/pending", async (req, res) => {
     const [rows] = await pool.query(
       `SELECT id, name, lastName, startDate, endDate, requestDate, days, accepted, who, notes
        FROM Holiday
-       WHERE (accepted IS NULL OR accepted = '')
+       WHERE (accepted IS NULL OR accepted = '' OR accepted = 'unpaid')
        ORDER BY requestDate DESC`
     );
 
