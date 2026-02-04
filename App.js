@@ -837,14 +837,14 @@ app.get("/holidays", async (req, res) => {
   }
 });
 
-// Request a holiday (employee)
+// Holiday Request endpoint
 app.post("/holidays/request", async (req, res) => {
   const { db, email, startDate, endDate, notes = "", type = "Paid" } = req.body;
 
   if (!db || !email || !startDate || !endDate) {
     return res.status(400).json({
       success: false,
-      message: "db, email, startDate and endDate are required"
+      message: "db, email, startDate and endDate are required",
     });
   }
 
@@ -858,32 +858,45 @@ app.post("/holidays/request", async (req, res) => {
     );
 
     if (!employeeRows || employeeRows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Employee not found"
-      });
+      return res.status(404).json({ success: false, message: "Employee not found" });
     }
 
     const employee = employeeRows[0];
 
-    // calculate days difference inclusive
-    const s = new Date(startDate);
-    const e = new Date(endDate);
-    const diff = Math.round((e - s) / (1000 * 60 * 60 * 24)) + 1;
+    // Parse start/end for diff (support dd/mm/yyyy + ISO)
+    const parseToUTCDate = (input) => {
+      const s = String(input).trim();
+      const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})/); // handles "(Day)" too
+      if (m) {
+        const dd = parseInt(m[1], 10);
+        const mm = parseInt(m[2], 10);
+        const yyyy = parseInt(m[3], 10);
+        return new Date(Date.UTC(yyyy, mm - 1, dd));
+      }
+      const d = new Date(s);
+      if (isNaN(d.getTime())) return null;
+      return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    };
 
-    if (diff <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid holiday period"
-      });
+    const sUTC = parseToUTCDate(startDate);
+    const eUTC = parseToUTCDate(endDate);
+
+    if (!sUTC || !eUTC) {
+      return res.status(400).json({ success: false, message: "Invalid date format" });
     }
 
-    // accepted logic:
-    // - if unpaid -> accepted = 'unpaid'
-    // - else -> accepted = '' (pending)
-    const acceptedValue = (type.toLowerCase() === "unpaid") ? "unpaid" : "";
+    const diff = Math.round((eUTC - sUTC) / (1000 * 60 * 60 * 24)) + 1;
+    if (diff <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid holiday period" });
+    }
 
-    const requestDate = new Date();
+    // If unpaid -> accepted = 'unpaid', else pending ''
+    const acceptedValue = String(type).toLowerCase() === "unpaid" ? "unpaid" : "";
+
+    const formattedStart = formatDateWithDay(startDate);
+    const formattedEnd = formatDateWithDay(endDate);
+
+    const requestDate = new Date(); // ok
 
     await pool.query(
       `INSERT INTO Holiday 
@@ -892,44 +905,143 @@ app.post("/holidays/request", async (req, res) => {
       [
         employee.name,
         employee.lastName,
-        startDate,
-        endDate,
+        formattedStart,
+        formattedEnd,
         requestDate,
         diff,
         acceptedValue,
-        "", // ✅ who stays empty (will be filled when approved)
-        notes
+        "", // who set on approval
+        notes,
       ]
     );
 
-    // create in-app notifications for AM/Manager
+    // Notify AM + Manager
     const title = "New Holiday Request";
-    const message = `${employee.name} ${employee.lastName} requested holiday from ${startDate} to ${endDate} (${diff} days) - ${type}`;
+    const message =
+      `${employee.name} ${employee.lastName} requested holiday from ` +
+      `${formattedStart} to ${formattedEnd} (${diff} days) - ${type}`;
 
     await pool.query(
       `INSERT INTO Notifications (targetRole, title, message, type)
-      VALUES (?, ?, ?, ?), (?, ?, ?, ?)`,
-      [
-        "AM", title, message, "HOLIDAY",
-        "Manager", title, message, "HOLIDAY"
-      ]
+       VALUES (?, ?, ?, ?), (?, ?, ?, ?)`,
+      ["AM", title, message, "HOLIDAY", "Manager", title, message, "HOLIDAY"]
     );
 
-    return res.json({
-      success: true,
-      message: "Holiday request submitted"
-    });
-
+    return res.json({ success: true, message: "Holiday request submitted" });
   } catch (err) {
     console.error("Error requesting holiday:", err);
     return res.status(500).json({
       success: false,
       message: "Server error requesting holiday",
-      error: err.message
+      error: err.message,
     });
   }
 });
 
+// Get pending holiday requests (AM / Manager)
+app.get("/holidays/pending", async (req, res) => {
+  const { db } = req.query;
+
+  if (!db) {
+    return res.status(400).json({ success: false, message: "db is required" });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    const [rows] = await pool.query(
+      `SELECT id, name, lastName, startDate, endDate, requestDate, days, accepted, who, notes
+       FROM Holiday
+       WHERE (accepted IS NULL OR accepted = '')
+       ORDER BY requestDate DESC`
+    );
+
+    return res.json({ success: true, holidays: rows });
+  } catch (err) {
+    console.error("Error fetching pending holidays:", err);
+    return res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
+
+// Endpoint for Holiday Decisions
+app.post("/holidays/decide", async (req, res) => {
+  const { db, id, decision, who } = req.body;
+
+  if (!db || !id || !decision || !who) {
+    return res.status(400).json({
+      success: false,
+      message: "db, id, decision, who are required",
+    });
+  }
+
+  const dec = String(decision).trim().toLowerCase();
+  const actor = String(who).trim();
+
+  if (!["approve", "decline"].includes(dec)) {
+    return res.status(400).json({ success: false, message: "decision must be approve or decline" });
+  }
+
+  if (!["AM", "Manager"].includes(actor)) {
+    return res.status(403).json({ success: false, message: "Only AM/Manager can decide" });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    const [rows] = await pool.query(
+      `SELECT id, name, lastName, startDate, endDate, days, notes, accepted
+       FROM Holiday
+       WHERE id = ?`,
+      [id]
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Holiday request not found" });
+    }
+
+    const h = rows[0];
+    const current = (h.accepted ?? "").toString().trim().toLowerCase();
+
+    // prevent double-deciding
+    if (current === "true" || current === "false") {
+      return res.status(400).json({ success: false, message: "Request already decided" });
+    }
+
+    const acceptedValue = dec === "approve" ? "true" : "false";
+
+    await pool.query(
+      `UPDATE Holiday SET accepted = ?, who = ? WHERE id = ?`,
+      [acceptedValue, actor, id]
+    );
+
+    // Notify AM + Manager with result
+    const title = dec === "approve" ? "Holiday Approved ✅" : "Holiday Declined ❌";
+
+    let message =
+      `${actor} ${dec === "approve" ? "approved" : "declined"} holiday for ` +
+      `${h.name} ${h.lastName}: ${h.startDate} to ${h.endDate}` +
+      (h.days ? ` (${h.days} days).` : ".");
+
+    // ✅ include notes if declined
+    const notes = (h.notes ?? "").toString().trim();
+    if (dec === "decline" && notes) {
+      message += ` Notes: ${notes}`;
+    }
+
+    await pool.query(
+      `INSERT INTO Notifications (targetRole, title, message, type)
+       VALUES (?, ?, ?, ?), (?, ?, ?, ?)`,
+      ["AM", title, message, "HOLIDAY_DECISION", "Manager", title, message, "HOLIDAY_DECISION"]
+    );
+
+    return res.json({ success: true, message: "Decision saved" });
+  } catch (err) {
+    console.error("Error deciding holiday:", err);
+    return res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
+
+// Notifications Endpoint
 app.get("/notifications", async (req, res) => {
   const { db, role } = req.query;
 
@@ -962,6 +1074,7 @@ app.get("/notifications", async (req, res) => {
   }
 });
 
+// Read Notifications Endpoint
 app.post("/notifications/read", async (req, res) => {
   const { db, id } = req.body;
 
@@ -989,6 +1102,56 @@ app.post("/notifications/read", async (req, res) => {
     });
   }
 });
+
+// If it's "dd/mm/yyyy" (no day), it will add the day.
+function formatDateWithDay(dateString) {
+  if (!dateString) return "";
+
+  try {
+    const str = String(dateString).trim();
+
+    // Case 1: already "dd/mm/yyyy (Day)"
+    const alreadyWithDay = /^(\d{2})\/(\d{2})\/(\d{4})\s*\([A-Za-z]+\)$/;
+    if (alreadyWithDay.test(str)) return str;
+
+    // Case 2: "dd/mm/yyyy" -> add day
+    const ddmmyyyy = /^(\d{2})\/(\d{2})\/(\d{4})$/;
+    const match = str.match(ddmmyyyy);
+    if (match) {
+      const day = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10);
+      const year = parseInt(match[3], 10);
+
+      // Create date in a stable way (avoid timezone shifts):
+      const d = new Date(Date.UTC(year, month - 1, day));
+      const weekday = new Intl.DateTimeFormat("en-GB", {
+        weekday: "long",
+        timeZone: "UTC",
+      }).format(d);
+
+      return `${match[1]}/${match[2]}/${match[3]} (${weekday})`;
+    }
+
+    // Case 3: ISO / Date / yyyy-mm-dd etc.
+    const parsed = new Date(str);
+    if (isNaN(parsed.getTime())) return str;
+
+    // Force UTC date parts to avoid “day changes” due to server timezone
+    const yyyy = parsed.getUTCFullYear();
+    const mm = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(parsed.getUTCDate()).padStart(2, "0");
+
+    const weekday = new Intl.DateTimeFormat("en-GB", {
+      weekday: "long",
+      timeZone: "UTC",
+    }).format(new Date(Date.UTC(yyyy, parsed.getUTCMonth(), parsed.getUTCDate())));
+
+    return `${dd}/${mm}/${yyyy} (${weekday})`;
+  } catch (err) {
+    console.error("Error formatting date with day:", err);
+    return String(dateString);
+  }
+}
 
 // Helper function to format dates
 function formatDate(dateString) {
