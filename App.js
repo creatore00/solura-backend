@@ -1062,20 +1062,18 @@ app.get("/notifications", async (req, res) => {
   const { db, role } = req.query;
 
   if (!db || !role) {
-    return res.status(400).json({
-      success: false,
-      message: "db and role are required"
-    });
+    return res.status(400).json({ success: false, message: "db and role are required" });
   }
 
   try {
     const pool = getPool(db);
 
     const [rows] = await pool.query(
-      `SELECT id, title, message, type, isRead, createdAt
+      `SELECT id, title, message, type, isRead,
+              DATE_FORMAT(CONVERT_TZ(createdAt, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z') as createdAt
        FROM Notifications
        WHERE targetRole = ?
-       ORDER BY createdAt DESC
+       ORDER BY id DESC
        LIMIT 50`,
       [role]
     );
@@ -1083,10 +1081,7 @@ app.get("/notifications", async (req, res) => {
     res.json({ success: true, notifications: rows });
   } catch (err) {
     console.error("Error fetching notifications:", err);
-    res.status(500).json({
-      success: false,
-      message: "Server error fetching notifications"
-    });
+    res.status(500).json({ success: false, message: "Server error fetching notifications" });
   }
 });
 
