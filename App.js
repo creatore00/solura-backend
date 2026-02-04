@@ -965,29 +965,47 @@ app.get("/holidays/pending", async (req, res) => {
 
 // Endpoint for Holiday Decisions
 app.post("/holidays/decide", async (req, res) => {
-  const { db, id, decision, who } = req.body;
+  const { db, id, decision, actorEmail } = req.body;
 
-  if (!db || !id || !decision || !who) {
+  if (!db || !id || !decision || !actorEmail) {
     return res.status(400).json({
       success: false,
-      message: "db, id, decision, who are required",
+      message: "db, id, decision, actorEmail are required",
     });
   }
 
   const dec = String(decision).trim().toLowerCase();
-  const actor = String(who).trim();
-
   if (!["approve", "decline"].includes(dec)) {
-    return res.status(400).json({ success: false, message: "decision must be approve or decline" });
-  }
-
-  if (!["AM", "Manager"].includes(actor)) {
-    return res.status(403).json({ success: false, message: "Only AM/Manager can decide" });
+    return res.status(400).json({
+      success: false,
+      message: "decision must be approve or decline",
+    });
   }
 
   try {
     const pool = getPool(db);
 
+    // 1) Find actor (approver/decliner) name by email
+    const [actorRows] = await pool.query(
+      "SELECT name, lastName, designation FROM Employees WHERE email = ?",
+      [actorEmail]
+    );
+
+    if (!actorRows || actorRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Actor not found" });
+    }
+
+    const actor = actorRows[0];
+    const actorFullName = `${actor.name} ${actor.lastName}`.trim();
+
+    // Optional: restrict permissions (only AM/Manager)
+    const role = String(actor.designation ?? "").trim().toLowerCase();
+    const allowed = role === "am" || role === "manager";
+    if (!allowed) {
+      return res.status(403).json({ success: false, message: "Not allowed" });
+    }
+
+    // 2) Load holiday request
     const [rows] = await pool.query(
       `SELECT id, name, lastName, startDate, endDate, days, notes, accepted
        FROM Holiday
@@ -1000,30 +1018,28 @@ app.post("/holidays/decide", async (req, res) => {
     }
 
     const h = rows[0];
-    const current = (h.accepted ?? "").toString().trim().toLowerCase();
-
-    // prevent double-deciding
+    const current = String(h.accepted ?? "").trim().toLowerCase();
     if (current === "true" || current === "false") {
       return res.status(400).json({ success: false, message: "Request already decided" });
     }
 
+    // 3) Update holiday with decision + who name
     const acceptedValue = dec === "approve" ? "true" : "false";
 
     await pool.query(
       `UPDATE Holiday SET accepted = ?, who = ? WHERE id = ?`,
-      [acceptedValue, actor, id]
+      [acceptedValue, actorFullName, id]
     );
 
-    // Notify AM + Manager with result
+    // 4) Notify ALL AM + Manager (not employee specific)
     const title = dec === "approve" ? "Holiday Approved ✅" : "Holiday Declined ❌";
 
     let message =
-      `${actor} ${dec === "approve" ? "approved" : "declined"} holiday for ` +
+      `${actorFullName} ${dec === "approve" ? "approved" : "declined"} holiday for ` +
       `${h.name} ${h.lastName}: ${h.startDate} to ${h.endDate}` +
       (h.days ? ` (${h.days} days).` : ".");
 
-    // ✅ include notes if declined
-    const notes = (h.notes ?? "").toString().trim();
+    const notes = String(h.notes ?? "").trim();
     if (dec === "decline" && notes) {
       message += ` Notes: ${notes}`;
     }
@@ -1034,7 +1050,7 @@ app.post("/holidays/decide", async (req, res) => {
       ["AM", title, message, "HOLIDAY_DECISION", "Manager", title, message, "HOLIDAY_DECISION"]
     );
 
-    return res.json({ success: true, message: "Decision saved" });
+    return res.json({ success: true, message: "Decision saved", who: actorFullName });
   } catch (err) {
     console.error("Error deciding holiday:", err);
     return res.status(500).json({ success: false, message: "Server error", error: err.message });
