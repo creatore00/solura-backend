@@ -983,41 +983,57 @@ app.post("/holidays/decide", async (req, res) => {
   }
 
   try {
-    const pool = getPool(db);
+    const tenantPool = getPool(db);
 
-    // 1) Verify actor exists + role is AM/Manager
-    // If your role is stored in Employees.designation, change this query accordingly.
-    const [actorRows] = await pool.query(
-      `SELECT name, lastName, designation
-       FROM Employees
-       WHERE email = ?`,
-      [actorEmail]
+    // ✅ 1) Authorise using GLOBAL users table (Access) for THIS db
+    // (this matches your /login logic)
+    const [userRows] = await pool.query(
+      `SELECT Access 
+       FROM users 
+       WHERE Email = ? AND db_name = ?`,
+      [actorEmail.trim(), db]
     );
 
-    if (!actorRows || actorRows.length === 0) {
-      return res.status(401).json({
+    if (!userRows || userRows.length === 0) {
+      return res.status(403).json({
         success: false,
-        message: "Not allowed (actor not found)",
+        message: "Not allowed (no access for this database)",
       });
     }
 
-    const actor = actorRows[0];
-    const actorRole = String(actor.designation || "").trim().toLowerCase();
+    const accessList = userRows.map(r => String(r.Access || "").trim().toLowerCase());
+    const isApprover = accessList.some(a => a === "am" || a === "manager");
 
-    if (actorRole !== "am" && actorRole !== "manager") {
+    if (!isApprover) {
       return res.status(403).json({
         success: false,
         message: "Not allowed",
       });
     }
 
-    const who = `${actor.name} ${actor.lastName}`.trim();
+    // ✅ 2) Get actor name for "who" from Employees table (fallback to email)
+    let who = actorEmail.trim();
+    const [actorEmpRows] = await tenantPool.query(
+      `SELECT name, lastName
+       FROM Employees
+       WHERE email = ?
+       LIMIT 1`,
+      [actorEmail.trim()]
+    );
 
-    // 2) Get holiday row
-    const [holidayRows] = await pool.query(
+    if (actorEmpRows && actorEmpRows.length > 0) {
+      const a = actorEmpRows[0];
+      const full = `${a.name || ""} ${a.lastName || ""}`.trim();
+      if (full) who = full;
+    }
+
+    // ✅ 3) Get holiday row
+    // NOTE: treat pending as: accepted NULL/''/'unpaid'
+    const [holidayRows] = await tenantPool.query(
       `SELECT id, name, lastName, startDate, endDate, notes
        FROM Holiday
-       WHERE id = ?`,
+       WHERE id = ?
+       LIMIT 1`,
       [id]
     );
 
@@ -1030,40 +1046,42 @@ app.post("/holidays/decide", async (req, res) => {
 
     const holiday = holidayRows[0];
 
-    // 3) Update decision
-    const acceptedValue = dec === "approve" ? "true" : "false";
+    // ✅ 4) Only allow deciding if still pending/unpaid (so it can’t be decided twice)
+    const currentAccepted = String(holiday.accepted || "").trim().toLowerCase();
+    const stillPendingOrUnpaid = currentAccepted === "" || currentAccepted === "unpaid";
 
-    // If declined: store reason into notes column (override or append)
-    let updatedNotes = holiday.notes || "";
-    const r = String(reason || "").trim();
-    if (dec === "decline" && r) {
-      updatedNotes = r; // simplest: override notes with decline reason
-      // If you prefer APPEND:
-      // updatedNotes = updatedNotes ? `${updatedNotes}\nDecline reason: ${r}` : `Decline reason: ${r}`;
+    if (!stillPendingOrUnpaid) {
+      return res.status(409).json({
+        success: false,
+        message: "This request was already decided",
+      });
     }
 
-    await pool.query(
+    const acceptedValue = dec === "approve" ? "true" : "false";
+
+    // ✅ decline reason saved into notes (overrides)
+    const declineReason = String(reason || "").trim();
+    const updatedNotes = dec === "decline" && declineReason ? declineReason : (holiday.notes || "");
+
+    await tenantPool.query(
       `UPDATE Holiday
        SET accepted = ?, who = ?, notes = ?
        WHERE id = ?`,
       [acceptedValue, who, updatedNotes, id]
     );
 
-    // 4) Notify AM/Manager groups (you asked to notify all AM/Manager, not specific email)
+    // ✅ 5) Notify AM + Manager groups
     const title = dec === "approve" ? "Holiday Approved" : "Holiday Declined";
-    const msg = dec === "approve"
-      ? `${holiday.name} ${holiday.lastName} holiday approved (${holiday.startDate} → ${holiday.endDate}) by ${who}`
-      : `${holiday.name} ${holiday.lastName} holiday declined (${holiday.startDate} → ${holiday.endDate}) by ${who}${r ? ` | Reason: ${r}` : ""}`;
+    const msg =
+      dec === "approve"
+        ? `${holiday.name} ${holiday.lastName} holiday approved (${holiday.startDate} → ${holiday.endDate}) by ${who}`
+        : `${holiday.name} ${holiday.lastName} holiday declined (${holiday.startDate} → ${holiday.endDate}) by ${who}${declineReason ? ` | Reason: ${declineReason}` : ""}`;
 
-    await pool.query(
+    await tenantPool.query(
       `INSERT INTO Notifications (targetRole, title, message, type)
        VALUES (?, ?, ?, ?), (?, ?, ?, ?)`,
       ["AM", title, msg, "HOLIDAY", "Manager", title, msg, "HOLIDAY"]
     );
-
-    // OPTIONAL: notify employee (only possible if you can target them somehow).
-    // Right now Notifications table targets roles only, so you can't target one employee.
-    // If you want employee notifications, add columns: targetEmail OR targetEmployeeId.
 
     return res.json({ success: true, message: "Decision saved" });
   } catch (err) {
