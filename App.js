@@ -738,53 +738,89 @@ if (startHour < 0 || startHour > 23 || startMin < 0 || startMin > 59 ||
 
 // Get holidays for an employee
 app.get("/holidays", async (req, res) => {
-  const { db, email, page = 1, limit = 5 } = req.query;
-  
+  const { db, email } = req.query;
+
   if (!db || !email) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "Database and email are required" 
+    return res.status(400).json({
+      success: false,
+      message: "Database and email are required",
     });
   }
 
   try {
     const pool = getPool(db);
-    
-    // 1. Get employee info from email
+
+    // 1) Get employee name/lastName from email
     const [employeeRows] = await pool.query(
       "SELECT name, lastName FROM Employees WHERE email = ?",
       [email]
     );
-    
+
     if (!employeeRows || employeeRows.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Employee not found" 
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
       });
     }
-    
-    const employee = employeeRows[0];
-    const { name, lastName } = employee;
-    
-    // 2. Calculate pagination
-    const pageNumber = parseInt(page);
-    const limitNumber = parseInt(limit);
-    const offset = (pageNumber - 1) * limitNumber;
-    
-    // 3. Get total count for pagination
-    const [countRows] = await pool.query(
-      `SELECT COUNT(*) as total 
-       FROM Holiday 
-       WHERE name = ? AND lastName = ? AND accepted = 'true'`,
-      [name, lastName]
+
+    const { name, lastName } = employeeRows[0];
+
+    // 2) Get holiday year settings row that contains TODAY (better than ORDER BY DESC)
+    // If your table only has one row, this still works.
+    const [settingsRows] = await pool.query(
+      `
+      SELECT HolidayYearStart, HolidayYearEnd
+      FROM HolidayYearSettings
+      WHERE CURDATE() BETWEEN HolidayYearStart AND HolidayYearEnd
+      ORDER BY HolidayYearStart DESC
+      LIMIT 1
+      `
     );
-    
-    const totalCount = countRows[0].total;
-    const totalPages = Math.ceil(totalCount / limitNumber);
-    
-    // 4. Get paginated holidays data
-    const query = `
-      SELECT 
+
+    if (!settingsRows || settingsRows.length === 0) {
+      // fallback: most recent row
+      const [fallbackRows] = await pool.query(
+        `
+        SELECT HolidayYearStart, HolidayYearEnd
+        FROM HolidayYearSettings
+        ORDER BY HolidayYearStart DESC
+        LIMIT 1
+        `
+      );
+
+      if (!fallbackRows || fallbackRows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "HolidayYearSettings not found for this business",
+        });
+      }
+
+      settingsRows.push(fallbackRows[0]);
+    }
+
+    const yearStart = settingsRows[0].HolidayYearStart; // yyyy-mm-dd
+    const yearEnd = settingsRows[0].HolidayYearEnd;     // yyyy-mm-dd
+
+    // ✅ Holiday table has startDate/endDate stored as: "dd/mm/yyyy (Day)"
+    const startDateSql = `STR_TO_DATE(SUBSTRING_INDEX(startDate, ' ', 1), '%d/%m/%Y')`;
+    const endDateSql   = `STR_TO_DATE(SUBSTRING_INDEX(endDate, ' ', 1), '%d/%m/%Y')`;
+    const requestDateSql = `STR_TO_DATE(SUBSTRING_INDEX(requestDate, ' ', 1), '%d/%m/%Y')`;
+
+    // ✅ PENDING definition (as you asked):
+    // accepted is NULL OR '' OR 'unpaid' AND who is NULL OR ''
+    const pendingWhere = `
+      (
+        accepted IS NULL
+        OR TRIM(accepted) = ''
+        OR LOWER(TRIM(accepted)) = 'unpaid'
+      )
+      AND (who IS NULL OR TRIM(who) = '')
+    `;
+
+    // 3) Pending holidays (any date)
+    const [pendingRows] = await pool.query(
+      `
+      SELECT
         name,
         lastName,
         startDate,
@@ -792,50 +828,122 @@ app.get("/holidays", async (req, res) => {
         requestDate,
         days,
         accepted,
-        who
-      FROM Holiday 
-      WHERE name = ? AND lastName = ? AND accepted = 'true'
-      ORDER BY requestDate DESC
-      LIMIT ? OFFSET ?
-    `;
-    
-    const [holidayRows] = await pool.query(query, [name, lastName, limitNumber, offset]);
-    
-    // 5. Format dates for display
-    const formattedHolidays = holidayRows.map(holiday => ({
-      name: holiday.name || '',
-      lastName: holiday.lastName || '',
-      startDate: holiday.startDate ? formatDate(holiday.startDate) : '',
-      endDate: holiday.endDate ? formatDate(holiday.endDate) : '',
-      requestDate: holiday.requestDate ? formatDate(holiday.requestDate) : '',
-      days: holiday.days || 0,
-      accepted: holiday.accepted || '',
-      who: holiday.who || '',
-      notes: holiday.notes || ''
-    }));
-    
+        who,
+        notes,
+        type
+      FROM Holiday
+      WHERE name = ? AND lastName = ?
+        AND ${pendingWhere}
+      ORDER BY ${requestDateSql} DESC
+      `,
+      [name, lastName]
+    );
+
+    // 4) Current business holiday year APPROVED holidays
+    const [currentRows] = await pool.query(
+      `
+      SELECT
+        name,
+        lastName,
+        startDate,
+        endDate,
+        requestDate,
+        days,
+        accepted,
+        who,
+        notes,
+        type
+      FROM Holiday
+      WHERE name = ? AND lastName = ?
+        AND accepted = 'true'
+        AND ${startDateSql} >= ?
+        AND ${endDateSql} <= ?
+      ORDER BY ${startDateSql} ASC
+      `,
+      [name, lastName, yearStart, yearEnd]
+    );
+
+    // 5) Past APPROVED holidays (before current yearStart) grouped by YEAR(startDate)
+    const [pastRows] = await pool.query(
+      `
+      SELECT
+        name,
+        lastName,
+        startDate,
+        endDate,
+        requestDate,
+        days,
+        accepted,
+        who,
+        notes,
+        type,
+        YEAR(${startDateSql}) AS holidayYear
+      FROM Holiday
+      WHERE name = ? AND lastName = ?
+        AND accepted = 'true'
+        AND ${startDateSql} < ?
+      ORDER BY ${startDateSql} DESC
+      `,
+      [name, lastName, yearStart]
+    );
+
+    const pastByYear = {};
+    for (const row of pastRows) {
+      const y = row.holidayYear ? String(row.holidayYear) : "Unknown";
+      if (!pastByYear[y]) pastByYear[y] = [];
+      pastByYear[y].push({
+        name: row.name || "",
+        lastName: row.lastName || "",
+        startDate: row.startDate || "",
+        endDate: row.endDate || "",
+        requestDate: row.requestDate || "",
+        days: row.days || 0,
+        accepted: row.accepted || "",
+        who: row.who || "",
+        notes: row.notes || "",
+        type: row.type || "",
+      });
+    }
+
     return res.json({
       success: true,
-      holidays: formattedHolidays,
-      pagination: {
-        currentPage: pageNumber,
-        totalPages: totalPages,
-        totalItems: totalCount,
-        itemsPerPage: limitNumber,
-        hasNextPage: pageNumber < totalPages,
-        hasPreviousPage: pageNumber > 1
-      }
+      holidayYear: { start: yearStart, end: yearEnd },
+      pendingHolidays: pendingRows.map((row) => ({
+        name: row.name || "",
+        lastName: row.lastName || "",
+        startDate: row.startDate || "",
+        endDate: row.endDate || "",
+        requestDate: row.requestDate || "",
+        days: row.days || 0,
+        accepted: row.accepted || "",
+        who: row.who || "",
+        notes: row.notes || "",
+        type: row.type || "",
+      })),
+      currentHolidays: currentRows.map((row) => ({
+        name: row.name || "",
+        lastName: row.lastName || "",
+        startDate: row.startDate || "",
+        endDate: row.endDate || "",
+        requestDate: row.requestDate || "",
+        days: row.days || 0,
+        accepted: row.accepted || "",
+        who: row.who || "",
+        notes: row.notes || "",
+        type: row.type || "",
+      })),
+      pastByYear,
     });
-    
   } catch (err) {
     console.error("Error fetching holidays:", err);
-    return res.status(500).json({ 
-      success: false, 
+    return res.status(500).json({
+      success: false,
       message: "Server error fetching holidays",
-      error: err.message 
+      error: err.message,
     });
   }
 });
+
 
 // Holiday Request endpoint
 app.post("/holidays/request", async (req, res) => {
