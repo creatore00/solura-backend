@@ -119,8 +119,9 @@ function formatDate(dateString) {
 // ==================== FEED ENDPOINTS ====================
 
 // Create a new feed post
+// Create a new feed post - FULLY FIXED
 app.post("/feed/create", async (req, res) => {
-  const { db, authorEmail, content, attachments, visibility = 'all', mentions = [] } = req.body;
+  const { db, authorEmail, content, attachments, visibility = 'all', mentions = [], poll } = req.body;
 
   if (!db || !authorEmail || !content) {
     return res.status(400).json({
@@ -152,23 +153,95 @@ app.post("/feed/create", async (req, res) => {
     
     const visibilityStr = Array.isArray(visibility) ? visibility.join(',') : visibility;
 
-    // Inserisci il post
+    // ===========================================
+    // 1. INSERT POST INTO FeedPosts
+    // ===========================================
     await pool.query(
       `INSERT INTO FeedPosts (
         id, authorName, authorEmail, authorDesignation, content, 
         attachments, visibility, createdAt, expiresAt, isPinned, isActive
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        postId, authorName, authorEmail, author.designation || '',
-        content, attachments ? JSON.stringify(attachments) : null,
-        visibilityStr, createdAt, null, false, true
+        postId, 
+        authorName, 
+        authorEmail, 
+        author.designation || '',
+        content, 
+        attachments && attachments.length > 0 ? JSON.stringify(attachments) : null,
+        visibilityStr, 
+        createdAt, 
+        null, 
+        false, 
+        true
       ]
     );
 
+    // ===========================================
+    // 2. INSERT POLL IF EXISTS
+    // ===========================================
+    if (poll) {
+      try {
+        const pollId = generatePostId();
+        await pool.query(
+          `INSERT INTO FeedPolls (id, postId, question, multipleChoice, endsAt, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            pollId,
+            postId,
+            poll.question,
+            poll.multipleChoice || false,
+            poll.endsAt || null,
+            new Date()
+          ]
+        );
+
+        // Insert poll options
+        for (const optionText of poll.options) {
+          const optionId = generatePostId();
+          await pool.query(
+            `INSERT INTO FeedPollOptions (id, pollId, optionText, votes)
+             VALUES (?, ?, ?, 0)`,
+            [optionId, pollId, optionText]
+          );
+        }
+      } catch (pollError) {
+        console.error("Error creating poll:", pollError);
+      }
+    }
+
+    // ===========================================
+    // 3. INSERT MEDIA IF EXISTS
+    // ===========================================
+    if (attachments && attachments.length > 0) {
+      for (const attachment of attachments) {
+        try {
+          const mediaId = generatePostId();
+          await pool.query(
+            `INSERT INTO FeedMedia (id, postId, type, url, filename, filesize, createdAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              mediaId,
+              postId,
+              attachment.type || 'file',
+              attachment.url || null,
+              attachment.name || null,
+              attachment.size || 0,
+              new Date()
+            ]
+          );
+        } catch (mediaError) {
+          console.error("Error inserting media:", mediaError);
+        }
+      }
+    }
+
     // Set per tracciare utenti già notificati (evita duplicati)
     const notifiedUsers = new Set();
+    const mentionDetails = [];
     
-    // 1. Crea notifiche per le menzioni
+    // ===========================================
+    // 4. PROCESS MENTIONS
+    // ===========================================
     if (mentions && mentions.length > 0) {
       for (const mention of mentions) {
         // Pulisci il testo della menzione (rimuovi @ se presente)
@@ -202,6 +275,7 @@ app.post("/feed/create", async (req, res) => {
           if (mentionedUser.email !== authorEmail && !notifiedUsers.has(mentionedUser.email)) {
             notifiedUsers.add(mentionedUser.email);
             
+            // 📌 4a. SEND MENTION NOTIFICATION
             try {
               await pool.query(
                 `INSERT INTO Notifications 
@@ -223,62 +297,83 @@ app.post("/feed/create", async (req, res) => {
             } catch (notifError) {
               console.error("Error inserting mention notification:", notifError);
             }
+
+            // 📌 4b. STORE MENTION IN FeedPostMentions TABLE
+            try {
+              const mentionId = generatePostId();
+              await pool.query(
+                `INSERT INTO FeedPostMentions (id, postId, mentionedEmail, mentionedName, createdAt)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [
+                  mentionId,
+                  postId,
+                  mentionedUser.email,
+                  `${mentionedUser.name} ${mentionedUser.lastName}`,
+                  new Date()
+                ]
+              );
+              
+              mentionDetails.push({
+                email: mentionedUser.email,
+                name: `${mentionedUser.name} ${mentionedUser.lastName}`
+              });
+              
+              console.log(`Mention stored for: ${mentionedUser.email}`);
+            } catch (mentionError) {
+              console.error("Error storing mention:", mentionError);
+            }
           }
         }
       }
     }
 
-    // 2. Crea notifiche generali per il feed (solo se non è già stata inviata una menzione)
-    const title = "📱 New Feed Post";
-    const message = `${authorName} posted: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`;
-
-    if (visibility === 'all') {
-      // Notifica FOH e BOH
-      try {
-        await pool.query(
-          `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ['FOH', title, message, 'FEED', postId, authorEmail, false, new Date()]
-        );
+    // ===========================================
+    // 5. SEND NOTIFICATIONS TO ALL USERS
+    // ===========================================
+    try {
+      // Get all employees except the author
+      const [allEmployees] = await pool.query(
+        `SELECT email FROM Employees WHERE email != ?`,
+        [authorEmail]
+      );
+      
+      const title = "📱 New Feed Post";
+      const message = `${authorName} posted: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`;
+      
+      // Insert one notification per user (efficient batch insert)
+      if (allEmployees.length > 0) {
+        const values = allEmployees.map(emp => [
+          'USER',           // targetRole
+          emp.email,        // targetEmail
+          authorEmail,      // authorEmail
+          title,           // title
+          message,         // message
+          'FEED',          // type
+          postId,          // postId
+          false,           // isRead
+          new Date()       // createdAt
+        ]);
+        
+        // Use batch insert for better performance
+        const placeholders = values.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+        const flatValues = values.flat();
         
         await pool.query(
-          `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ['BOH', title, message, 'FEED', postId, authorEmail, false, new Date()]
+          `INSERT INTO Notifications 
+           (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
+           VALUES ${placeholders}`,
+          flatValues
         );
         
-        // Notifica anche Manager e AM se esistono
-        await pool.query(
-          `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ['Manager', title, message, 'FEED', postId, authorEmail, false, new Date()]
-        );
-        
-        await pool.query(
-          `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ['AM', title, message, 'FEED', postId, authorEmail, false, new Date()]
-        );
-      } catch (notifError) {
-        console.error("Error inserting feed notifications:", notifError);
+        console.log(`Feed notifications sent to ${allEmployees.length} users`);
       }
-    } else {
-      const targets = Array.isArray(visibility) ? visibility : [visibility];
-      for (const target of targets) {
-        if (target && target !== 'all') {
-          try {
-            await pool.query(
-              `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-              [target, title, message, 'FEED', postId, authorEmail, false, new Date()]
-            );
-          } catch (notifError) {
-            console.error(`Error inserting notification for ${target}:`, notifError);
-          }
-        }
-      }
+    } catch (notifError) {
+      console.error("Error sending notifications to all users:", notifError);
     }
 
+    // ===========================================
+    // 6. RETURN SUCCESS RESPONSE
+    // ===========================================
     return res.json({
       success: true,
       message: "Post created successfully",
@@ -293,10 +388,12 @@ app.post("/feed/create", async (req, res) => {
         visibility: visibilityStr,
         createdAt,
         isPinned: false,
+        isActive: true,
         likes: 0,
         comments: 0,
         likedByUser: false,
-        mentions: Array.from(notifiedUsers)
+        mentions: mentionDetails,
+        hasPoll: !!poll
       }
     });
 
@@ -333,7 +430,7 @@ app.get("/feed/posts", async (req, res) => {
 
     const userDesignation = userRows[0]?.designation || 'FOH';
 
-    // Build query based on visibility and filters
+    // ✅ FIXED: Use correct table names FeedPosts, FeedLikes, FeedComments
     let query = `
       SELECT 
         p.*,
@@ -363,7 +460,6 @@ app.get("/feed/posts", async (req, res) => {
 
     const params = [userEmail, userDesignation, userEmail];
 
-    // Apply additional filters
     if (filter === 'pinned') {
       query += ` AND p.isPinned = true`;
     } else if (filter === 'my_posts') {
@@ -376,6 +472,15 @@ app.get("/feed/posts", async (req, res) => {
 
     const [posts] = await pool.query(query, params);
 
+    // Get mentions for each post
+    for (let i = 0; i < posts.length; i++) {
+      const [mentions] = await pool.query(
+        `SELECT mentionedEmail, mentionedName FROM FeedPostMentions WHERE postId = ?`,
+        [posts[i].id]
+      );
+      posts[i].mentions = mentions.map(m => m.mentionedName);
+    }
+
     // Parse attachments JSON
     const formattedPosts = posts.map(post => ({
       ...post,
@@ -387,7 +492,6 @@ app.get("/feed/posts", async (req, res) => {
       likedByUser: !!post.liked_by_user
     }));
 
-    // Get total count for pagination
     const [countResult] = await pool.query(
       `SELECT COUNT(*) as total FROM FeedPosts WHERE isActive = true`
     );
@@ -889,6 +993,8 @@ app.get("/employees/search", async (req, res) => {
 
   try {
     const pool = getPool(db);
+    
+    // ✅ FIXED: Better search that works with first name only
     let query = `
       SELECT name, lastName, email, designation 
       FROM Employees 
@@ -898,8 +1004,15 @@ app.get("/employees/search", async (req, res) => {
 
     if (search && search.trim() !== '') {
       const searchTerm = `%${search.trim()}%`;
-      query += ` AND (name LIKE ? OR lastName LIKE ? OR CONCAT(name, ' ', lastName) LIKE ? OR email LIKE ?)`;
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      // Search in name, lastName, and full name
+      query += ` AND (
+        name LIKE ? OR 
+        lastName LIKE ? OR 
+        CONCAT(name, ' ', lastName) LIKE ? OR 
+        CONCAT(lastName, ' ', name) LIKE ? OR
+        email LIKE ?
+      )`;
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
     if (excludeEmail) {
@@ -907,7 +1020,22 @@ app.get("/employees/search", async (req, res) => {
       params.push(excludeEmail);
     }
 
-    query += ` ORDER BY name, lastName LIMIT ?`;
+    query += ` ORDER BY 
+      CASE 
+        WHEN name LIKE ? THEN 1
+        WHEN lastName LIKE ? THEN 2
+        ELSE 3
+      END, 
+      name, 
+      lastName 
+      LIMIT ?`;
+    
+    if (search && search.trim() !== '') {
+      const exactTerm = `${search.trim()}%`;
+      params.push(exactTerm, exactTerm);
+    } else {
+      params.push('%%', '%%');
+    }
     params.push(parseInt(limit));
 
     const [rows] = await pool.query(query, params);
@@ -919,9 +1047,10 @@ app.get("/employees/search", async (req, res) => {
       email: emp.email,
       designation: emp.designation || '',
       avatar: emp.name.charAt(0) + (emp.lastName ? emp.lastName.charAt(0) : ''),
-      searchKey: `${emp.name} ${emp.lastName} ${emp.email}`.toLowerCase()
     }));
 
+    console.log(`Found ${employees.length} employees for search: "${search}"`);
+    
     return res.json({
       success: true,
       employees
