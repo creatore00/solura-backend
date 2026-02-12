@@ -120,7 +120,16 @@ function formatDate(dateString) {
 
 // Create a new feed post
 app.post("/feed/create", async (req, res) => {
-  const { db, authorEmail, content, attachments, visibility = 'all', mentions = [], poll } = req.body;
+  const { 
+    db, 
+    authorEmail, 
+    content, 
+    attachments, 
+    visibility = 'all', 
+    mentions = [], 
+    bulkMentions = [], 
+    poll 
+  } = req.body;
 
   if (!db || !authorEmail || !content) {
     return res.status(400).json({
@@ -203,18 +212,32 @@ app.post("/feed/create", async (req, res) => {
             [optionId, pollId, optionText]
           );
         }
+        
+        console.log(`✅ Poll created: ${pollId}`);
       } catch (pollError) {
-        console.error("Error creating poll:", pollError);
+        console.error("❌ Error creating poll:", pollError);
       }
     }
 
     // ===========================================
-    // 3. INSERT MEDIA IF EXISTS
+    // 3. INSERT MEDIA IF EXISTS - FIXED VERSION
     // ===========================================
     if (attachments && attachments.length > 0) {
       for (const attachment of attachments) {
         try {
           const mediaId = generatePostId();
+          let url = null;
+          
+          // Handle image data
+          if (attachment.type === 'image' && attachment.data) {
+            // For development: create data URL
+            url = `data:image/jpeg;base64,${attachment.data}`;
+            
+            // For production: you would upload to cloud storage here
+            // const cloudinaryUrl = await uploadToCloudinary(attachment.data);
+            // url = cloudinaryUrl;
+          }
+          
           await pool.query(
             `INSERT INTO FeedMedia (id, postId, type, url, filename, filesize, createdAt)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -222,14 +245,16 @@ app.post("/feed/create", async (req, res) => {
               mediaId,
               postId,
               attachment.type || 'file',
-              attachment.url || null,
+              url,
               attachment.name || null,
               attachment.size || 0,
               new Date()
             ]
           );
+          
+          console.log(`✅ Media saved: ${attachment.type} - ${url ? 'URL generated' : 'no URL'}`);
         } catch (mediaError) {
-          console.error("Error inserting media:", mediaError);
+          console.error("❌ Error inserting media:", mediaError);
         }
       }
     }
@@ -239,16 +264,14 @@ app.post("/feed/create", async (req, res) => {
     const mentionDetails = [];
     
     // ===========================================
-    // 4. PROCESS MENTIONS
+    // 4. PROCESS REGULAR MENTIONS
     // ===========================================
     if (mentions && mentions.length > 0) {
       for (const mention of mentions) {
-        // Pulisci il testo della menzione (rimuovi @ se presente)
         const cleanMention = mention.replace('@', '').trim();
         
         if (cleanMention.length < 2) continue;
 
-        // Cerca l'impiegato in diversi modi
         const [mentionedRows] = await pool.query(
           `SELECT email, name, lastName, designation 
            FROM Employees 
@@ -270,11 +293,10 @@ app.post("/feed/create", async (req, res) => {
         );
 
         for (const mentionedUser of mentionedRows) {
-          // Non notificare l'autore del post
           if (mentionedUser.email !== authorEmail && !notifiedUsers.has(mentionedUser.email)) {
             notifiedUsers.add(mentionedUser.email);
             
-            // 📌 4a. SEND MENTION NOTIFICATION
+            // Send mention notification
             try {
               await pool.query(
                 `INSERT INTO Notifications 
@@ -292,12 +314,12 @@ app.post("/feed/create", async (req, res) => {
                   new Date()
                 ]
               );
-              console.log(`Mention notification sent to: ${mentionedUser.email}`);
+              console.log(`✅ Mention notification sent to: ${mentionedUser.email}`);
             } catch (notifError) {
-              console.error("Error inserting mention notification:", notifError);
+              console.error("❌ Error inserting mention notification:", notifError);
             }
 
-            // 📌 4b. STORE MENTION IN FeedPostMentions TABLE
+            // Store mention in FeedPostMentions
             try {
               const mentionId = generatePostId();
               await pool.query(
@@ -317,9 +339,9 @@ app.post("/feed/create", async (req, res) => {
                 name: `${mentionedUser.name} ${mentionedUser.lastName}`
               });
               
-              console.log(`Mention stored for: ${mentionedUser.email}`);
+              console.log(`✅ Mention stored for: ${mentionedUser.email}`);
             } catch (mentionError) {
-              console.error("Error storing mention:", mentionError);
+              console.error("❌ Error storing mention:", mentionError);
             }
           }
         }
@@ -327,10 +349,66 @@ app.post("/feed/create", async (req, res) => {
     }
 
     // ===========================================
-    // 5. SEND NOTIFICATIONS TO ALL USERS
+    // 5. PROCESS BULK MENTIONS (FOH, BOH, EVERYONE)
+    // ===========================================
+    if (bulkMentions && bulkMentions.length > 0) {
+      for (const bulk of bulkMentions) {
+        const cleanBulk = bulk.replace('@', '').trim().toUpperCase();
+        
+        let targetEmployees = [];
+        
+        if (cleanBulk === 'FOH' || cleanBulk === 'BOH') {
+          // Get all employees with this designation
+          const [rows] = await pool.query(
+            `SELECT email, name, lastName FROM Employees WHERE UPPER(designation) = ?`,
+            [cleanBulk]
+          );
+          targetEmployees = rows;
+        } else if (cleanBulk === 'EVERYONE' || cleanBulk === 'ALL') {
+          // Get all employees except author
+          const [rows] = await pool.query(
+            `SELECT email, name, lastName FROM Employees WHERE email != ?`,
+            [authorEmail]
+          );
+          targetEmployees = rows;
+        }
+
+        // Send notifications to all target employees
+        for (const emp of targetEmployees) {
+          if (!notifiedUsers.has(emp.email)) {
+            notifiedUsers.add(emp.email);
+            
+            try {
+              await pool.query(
+                `INSERT INTO Notifications 
+                 (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                  'USER',
+                  emp.email,
+                  authorEmail,
+                  `📢 New post for ${cleanBulk} team`,
+                  `${authorName} posted: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`,
+                  'FEED',
+                  postId,
+                  false,
+                  new Date()
+                ]
+              );
+            } catch (notifError) {
+              console.error(`❌ Error sending bulk notification to ${emp.email}:`, notifError);
+            }
+          }
+        }
+        
+        console.log(`✅ Bulk mention processed for ${cleanBulk}: ${targetEmployees.length} employees`);
+      }
+    }
+
+    // ===========================================
+    // 6. SEND NOTIFICATIONS TO ALL USERS
     // ===========================================
     try {
-      // Get all employees except the author
       const [allEmployees] = await pool.query(
         `SELECT email FROM Employees WHERE email != ?`,
         [authorEmail]
@@ -339,40 +417,62 @@ app.post("/feed/create", async (req, res) => {
       const title = "📱 New Feed Post";
       const message = `${authorName} posted: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`;
       
-      // Insert one notification per user (efficient batch insert)
       if (allEmployees.length > 0) {
-        const values = allEmployees.map(emp => [
-          'USER',           // targetRole
-          emp.email,        // targetEmail
-          authorEmail,      // authorEmail
-          title,           // title
-          message,         // message
-          'FEED',          // type
-          postId,          // postId
-          false,           // isRead
-          new Date()       // createdAt
-        ]);
+        // Filter out users who already got mention notifications
+        const usersToNotify = allEmployees.filter(emp => !notifiedUsers.has(emp.email));
         
-        // Use batch insert for better performance
-        const placeholders = values.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
-        const flatValues = values.flat();
-        
-        await pool.query(
-          `INSERT INTO Notifications 
-           (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
-           VALUES ${placeholders}`,
-          flatValues
-        );
-        
-        console.log(`Feed notifications sent to ${allEmployees.length} users`);
+        if (usersToNotify.length > 0) {
+          const values = usersToNotify.map(emp => [
+            'USER',
+            emp.email,
+            authorEmail,
+            title,
+            message,
+            'FEED',
+            postId,
+            false,
+            new Date()
+          ]);
+          
+          const placeholders = values.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+          const flatValues = values.flat();
+          
+          await pool.query(
+            `INSERT INTO Notifications 
+             (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
+             VALUES ${placeholders}`,
+            flatValues
+          );
+          
+          console.log(`✅ Feed notifications sent to ${usersToNotify.length} users`);
+        }
       }
     } catch (notifError) {
-      console.error("Error sending notifications to all users:", notifError);
+      console.error("❌ Error sending notifications to all users:", notifError);
     }
 
     // ===========================================
-    // 6. RETURN SUCCESS RESPONSE
+    // 7. RETURN SUCCESS RESPONSE
     // ===========================================
+    
+    // Get media URLs to return
+    let imageUrl = null;
+    let videoUrl = null;
+    
+    if (attachments && attachments.length > 0) {
+      const imageAttachment = attachments.find(a => a.type === 'image');
+      if (imageAttachment) {
+        imageUrl = imageAttachment.data 
+          ? `data:image/jpeg;base64,${imageAttachment.data}`
+          : imageAttachment.url;
+      }
+      
+      const videoAttachment = attachments.find(a => a.type === 'video');
+      if (videoAttachment) {
+        videoUrl = videoAttachment.url;
+      }
+    }
+
     return res.json({
       success: true,
       message: "Post created successfully",
@@ -383,21 +483,25 @@ app.post("/feed/create", async (req, res) => {
         authorEmail,
         authorDesignation: author.designation,
         content,
+        imageUrl,
+        videoUrl,
         attachments: attachments || [],
         visibility: visibilityStr,
         createdAt,
+        expiresAt: null,
         isPinned: false,
         isActive: true,
         likes: 0,
         comments: 0,
         likedByUser: false,
-        mentions: mentionDetails,
+        mentions: mentionDetails.map(m => m.name),
+        bulkMentions: bulkMentions || [],
         hasPoll: !!poll
       }
     });
 
   } catch (err) {
-    console.error("Error creating feed post:", err);
+    console.error("❌ Error creating feed post:", err);
     return res.status(500).json({
       success: false,
       message: "Server error creating post",
@@ -429,7 +533,7 @@ app.get("/feed/posts", async (req, res) => {
 
     const userDesignation = userRows[0]?.designation || 'FOH';
 
-    // ✅ FIXED: Use correct table names with proper case sensitivity
+    // Main query to get posts
     let query = `
       SELECT 
         p.id,
@@ -469,6 +573,7 @@ app.get("/feed/posts", async (req, res) => {
 
     const params = [userEmail, userDesignation, userEmail];
 
+    // Apply filters
     if (filter === 'pinned') {
       query += ` AND p.isPinned = true`;
     } else if (filter === 'my_posts') {
@@ -479,23 +584,41 @@ app.get("/feed/posts", async (req, res) => {
     query += ` ORDER BY p.isPinned DESC, p.createdAt DESC LIMIT ? OFFSET ?`;
     params.push(parseInt(limit), offset);
 
-    console.log("Executing query with params:", params);
+    console.log("📡 Executing feed posts query...");
     const [posts] = await pool.query(query, params);
     
-    console.log(`Found ${posts.length} posts`);
+    console.log(`✅ Found ${posts.length} posts`);
 
-    // Get mentions for each post
+    // ===========================================
+    // ENRICH POSTS WITH ADDITIONAL DATA
+    // ===========================================
     for (let i = 0; i < posts.length; i++) {
+      const post = posts[i];
+      
+      // 1. GET MENTIONS
       const [mentions] = await pool.query(
         `SELECT mentionedEmail, mentionedName FROM FeedPostMentions WHERE postId = ?`,
-        [posts[i].id]
+        [post.id]
       );
-      posts[i].mentions = mentions.map(m => m.mentionedName);
+      post.mentions = mentions.map(m => m.mentionedName);
       
-      // Get media for each post
+      // 2. GET BULK MENTIONS FROM CONTENT
+      const bulkMentions = [];
+      const content = post.content || '';
+      const bulkRegex = /@(FOH|BOH|EVERYONE|ALL)\b/gi;
+      let match;
+      while ((match = bulkRegex.exec(content)) !== null) {
+        const mention = match[1].toUpperCase();
+        if (!bulkMentions.includes(mention)) {
+          bulkMentions.push(mention);
+        }
+      }
+      post.bulkMentions = bulkMentions;
+      
+      // 3. GET MEDIA
       const [media] = await pool.query(
         `SELECT * FROM FeedMedia WHERE postId = ?`,
-        [posts[i].id]
+        [post.id]
       );
       
       // Set imageUrl/videoUrl from media
@@ -503,14 +626,14 @@ app.get("/feed/posts", async (req, res) => {
         const imageMedia = media.find(m => m.type === 'image');
         const videoMedia = media.find(m => m.type === 'video');
         
-        if (imageMedia) posts[i].imageUrl = imageMedia.url;
-        if (videoMedia) posts[i].videoUrl = videoMedia.url;
+        if (imageMedia) post.imageUrl = imageMedia.url;
+        if (videoMedia) post.videoUrl = videoMedia.url;
       }
       
-      // Get poll for each post
+      // 4. GET POLL
       const [polls] = await pool.query(
         `SELECT * FROM FeedPolls WHERE postId = ?`,
-        [posts[i].id]
+        [post.id]
       );
       
       if (polls.length > 0) {
@@ -530,6 +653,15 @@ app.get("/feed/posts", async (req, res) => {
             [poll.id, userEmail]
           );
           hasVoted = votes.length > 0;
+          
+          // Check which option the user voted for
+          if (hasVoted && votes.length > 0) {
+            const userVote = votes[0];
+            // Mark the selected option
+            for (let opt of options) {
+              opt.isSelected = opt.id === userVote.optionId;
+            }
+          }
         }
         
         // Calculate percentages
@@ -539,10 +671,10 @@ app.get("/feed/posts", async (req, res) => {
           text: opt.optionText,
           votes: opt.votes,
           percentage: totalVotes > 0 ? (opt.votes / totalVotes) * 100 : 0,
-          isSelected: false // Will be set on frontend
+          isSelected: opt.isSelected || false
         }));
         
-        posts[i].poll = {
+        post.poll = {
           id: poll.id,
           question: poll.question,
           options: optionsWithPercentages,
@@ -553,21 +685,50 @@ app.get("/feed/posts", async (req, res) => {
       }
     }
 
-    // Parse attachments JSON
-    const formattedPosts = posts.map(post => ({
-      ...post,
-      attachments: post.attachments ? JSON.parse(post.attachments) : [],
-      createdAt: post.createdAt,
-      expiresAt: post.expiresAt,
-      likes: parseInt(post.likes_count) || 0,
-      comments: parseInt(post.comments_count) || 0,
-      likedByUser: !!post.liked_by_user,
-      mentions: post.mentions || []
-    }));
+    // ===========================================
+    // FORMAT POSTS FOR FRONTEND
+    // ===========================================
+    const formattedPosts = posts.map(post => {
+      // Parse attachments JSON safely
+      let attachments = [];
+      try {
+        attachments = post.attachments ? JSON.parse(post.attachments) : [];
+      } catch (e) {
+        console.error(`❌ Error parsing attachments for post ${post.id}:`, e);
+      }
 
+      return {
+        id: post.id,
+        authorName: post.authorName,
+        authorEmail: post.authorEmail,
+        authorDesignation: post.authorDesignation || '',
+        content: post.content || '',
+        imageUrl: post.imageUrl || null,
+        videoUrl: post.videoUrl || null,
+        attachments: attachments,
+        visibility: post.visibility || 'all',
+        createdAt: post.createdAt,
+        expiresAt: post.expiresAt,
+        isPinned: post.isPinned === 1 || post.isPinned === true,
+        isActive: post.isActive === 1 || post.isActive === true,
+        likes: parseInt(post.likes_count) || 0,
+        comments: parseInt(post.comments_count) || 0,
+        likedByUser: !!post.liked_by_user,
+        mentions: post.mentions || [],
+        bulkMentions: post.bulkMentions || [], // 🔴 FIXED: Now included!
+        poll: post.poll || null
+      };
+    });
+
+    // Get total count for pagination
     const [countResult] = await pool.query(
       `SELECT COUNT(*) as total FROM FeedPosts WHERE isActive = true`
     );
+
+    console.log(`✅ Returning ${formattedPosts.length} formatted posts`);
+    if (formattedPosts.length > 0) {
+      console.log(`📝 First post bulkMentions: ${formattedPosts[0].bulkMentions}`);
+    }
 
     return res.json({
       success: true,
@@ -581,7 +742,7 @@ app.get("/feed/posts", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Error fetching feed posts:", err);
+    console.error("❌ Error fetching feed posts:", err);
     return res.status(500).json({
       success: false,
       message: "Server error fetching posts",
@@ -688,6 +849,51 @@ app.post("/feed/like", async (req, res) => {
   }
 });
 
+// GET LIKES FOR A POST
+app.get("/feed/likes", async (req, res) => {
+  const { db, postId } = req.query;
+
+  if (!db || !postId) {
+    return res.status(400).json({
+      success: false,
+      message: "Database and postId are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    const [likes] = await pool.query(
+      `SELECT l.userEmail, l.createdAt, e.name, e.lastName, e.designation
+       FROM FeedLikes l
+       LEFT JOIN Employees e ON l.userEmail = e.email
+       WHERE l.postId = ?
+       ORDER BY l.createdAt DESC`,
+      [postId]
+    );
+
+    const formattedLikes = likes.map(like => ({
+      userEmail: like.userEmail,
+      userName: like.name && like.lastName ? `${like.name} ${like.lastName}` : like.userEmail,
+      designation: like.designation || '',
+      createdAt: like.createdAt
+    }));
+
+    return res.json({
+      success: true,
+      likes: formattedLikes
+    });
+
+  } catch (err) {
+    console.error("❌ Error fetching likes:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching likes",
+      error: err.message
+    });
+  }
+});
+
 // Add comment to post
 app.post("/feed/comment", async (req, res) => {
   const { db, postId, userEmail, content } = req.body;
@@ -774,6 +980,48 @@ app.post("/feed/comment", async (req, res) => {
   }
 });
 
+// Get media by ID
+app.get("/feed/media", async (req, res) => {
+  const { db, mediaId } = req.query;
+
+  if (!db || !mediaId) {
+    return res.status(400).json({
+      success: false,
+      message: "Database and mediaId are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    const [media] = await pool.query(
+      `SELECT * FROM FeedMedia WHERE id = ?`,
+      [mediaId]
+    );
+
+    if (media.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Media not found"
+      });
+    }
+
+    return res.json({
+      success: true,
+      url: media[0].url,
+      type: media[0].type
+    });
+
+  } catch (err) {
+    console.error("Error fetching media:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching media",
+      error: err.message
+    });
+  }
+});
+
 // Get comments for a post
 app.get("/feed/comments", async (req, res) => {
   const { db, postId } = req.query;
@@ -789,19 +1037,32 @@ app.get("/feed/comments", async (req, res) => {
     const pool = getPool(db);
 
     const [comments] = await pool.query(
-      `SELECT * FROM FeedComments 
-       WHERE postId = ? 
-       ORDER BY createdAt DESC`,
+      `SELECT c.id, c.userEmail, c.userName, c.userDesignation, c.content, c.createdAt,
+              e.name, e.lastName, e.designation
+       FROM FeedComments c
+       LEFT JOIN Employees e ON c.userEmail = e.email
+       WHERE c.postId = ?
+       ORDER BY c.createdAt DESC`,
       [postId]
     );
 
+    // Ensure we have proper names
+    const formattedComments = comments.map(comment => ({
+      id: comment.id,
+      userEmail: comment.userEmail,
+      userName: comment.userName || (comment.name && comment.lastName ? `${comment.name} ${comment.lastName}` : comment.userEmail),
+      userDesignation: comment.userDesignation || comment.designation || '',
+      content: comment.content,
+      createdAt: comment.createdAt
+    }));
+
     return res.json({
       success: true,
-      comments
+      comments: formattedComments
     });
 
   } catch (err) {
-    console.error("Error fetching comments:", err);
+    console.error("❌ Error fetching comments:", err);
     return res.status(500).json({
       success: false,
       message: "Server error fetching comments",
@@ -926,6 +1187,181 @@ app.post("/feed/pin", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Server error updating post",
+      error: err.message
+    });
+  }
+});
+
+// Vote in a poll
+app.post("/feed/poll/vote", async (req, res) => {
+  const { db, pollId, optionId, userEmail } = req.body;
+
+  if (!db || !pollId || !optionId || !userEmail) {
+    return res.status(400).json({
+      success: false,
+      message: "Database, pollId, optionId, and userEmail are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    // Check if user already voted
+    const [existingVote] = await pool.query(
+      `SELECT * FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
+      [pollId, userEmail]
+    );
+
+    if (existingVote.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "You have already voted in this poll"
+      });
+    }
+
+    // Get poll to check if it's still active
+    const [poll] = await pool.query(
+      `SELECT * FROM FeedPolls WHERE id = ?`,
+      [pollId]
+    );
+
+    if (poll.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Poll not found"
+      });
+    }
+
+    // Check if poll has expired
+    if (poll[0].endsAt && new Date(poll[0].endsAt) < new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: "This poll has ended"
+      });
+    }
+
+    // Insert vote
+    const voteId = generatePostId();
+    await pool.query(
+      `INSERT INTO FeedPollVotes (id, pollId, optionId, userEmail, createdAt)
+       VALUES (?, ?, ?, ?, NOW())`,
+      [voteId, pollId, optionId, userEmail]
+    );
+
+    // Increment vote count on the option
+    await pool.query(
+      `UPDATE FeedPollOptions SET votes = votes + 1 WHERE id = ?`,
+      [optionId]
+    );
+
+    // ========== AGGIUNGI NOTIFICHE ==========
+    // Get user info for notification
+    const [userRows] = await pool.query(
+      `SELECT name, lastName FROM Employees WHERE email = ?`,
+      [userEmail]
+    );
+
+    const userName = userRows.length > 0 
+      ? `${userRows[0].name} ${userRows[0].lastName}`
+      : userEmail;
+
+    // Get post author and post info
+    const [postRows] = await pool.query(
+      `SELECT p.authorEmail, p.id as postId, p.authorName
+       FROM FeedPosts p
+       JOIN FeedPolls pol ON p.id = pol.postId
+       WHERE pol.id = ?`,
+      [pollId]
+    );
+
+    if (postRows.length > 0 && postRows[0].authorEmail !== userEmail) {
+      // Get option text
+      const [optionRows] = await pool.query(
+        `SELECT optionText FROM FeedPollOptions WHERE id = ?`,
+        [optionId]
+      );
+      
+      const optionText = optionRows.length > 0 ? optionRows[0].optionText : 'a option';
+
+      // Notify post author
+      await pool.query(
+        `INSERT INTO Notifications 
+         (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'USER',
+          postRows[0].authorEmail,
+          userEmail,
+          '🗳️ New vote in your poll',
+          `${userName} voted for "${optionText}" in your poll`,
+          'POLL',
+          postRows[0].postId,
+          false,
+          new Date()
+        ]
+      );
+    }
+
+    return res.json({
+      success: true,
+      message: "Vote recorded successfully"
+    });
+
+  } catch (err) {
+    console.error("❌ Error voting in poll:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error voting in poll",
+      error: err.message
+    });
+  }
+});
+
+// GET POLL VOTES 
+app.get("/feed/poll/votes", async (req, res) => {
+  const { db, pollId } = req.query;
+
+  if (!db || !pollId) {
+    return res.status(400).json({
+      success: false,
+      message: "Database and pollId are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    const [votes] = await pool.query(
+      `SELECT v.userEmail, v.optionId, v.createdAt, 
+              e.name, e.lastName, e.designation,
+              o.optionText
+       FROM FeedPollVotes v
+       LEFT JOIN Employees e ON v.userEmail = e.email
+       LEFT JOIN FeedPollOptions o ON v.optionId = o.id
+       WHERE v.pollId = ?
+       ORDER BY v.createdAt DESC`,
+      [pollId]
+    );
+
+    const formattedVotes = votes.map(vote => ({
+      userEmail: vote.userEmail,
+      userName: vote.name && vote.lastName ? `${vote.name} ${vote.lastName}` : vote.userEmail,
+      designation: vote.designation || '',
+      optionId: vote.optionId,
+      optionText: vote.optionText || 'Unknown option',
+      createdAt: vote.createdAt
+    }));
+
+    return res.json({
+      success: true,
+      votes: formattedVotes
+    });
+
+  } catch (err) {
+    console.error("❌ Error fetching poll votes:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching poll votes",
       error: err.message
     });
   }
