@@ -119,7 +119,6 @@ function formatDate(dateString) {
 // ==================== FEED ENDPOINTS ====================
 
 // Create a new feed post
-// Create a new feed post - FULLY FIXED
 app.post("/feed/create", async (req, res) => {
   const { db, authorEmail, content, attachments, visibility = 'all', mentions = [], poll } = req.body;
 
@@ -430,10 +429,20 @@ app.get("/feed/posts", async (req, res) => {
 
     const userDesignation = userRows[0]?.designation || 'FOH';
 
-    // ✅ FIXED: Use correct table names FeedPosts, FeedLikes, FeedComments
+    // ✅ FIXED: Use correct table names with proper case sensitivity
     let query = `
       SELECT 
-        p.*,
+        p.id,
+        p.authorName,
+        p.authorEmail,
+        p.authorDesignation,
+        p.content,
+        p.attachments,
+        p.visibility,
+        p.createdAt,
+        p.expiresAt,
+        p.isPinned,
+        p.isActive,
         COALESCE(l.likes_count, 0) as likes_count,
         COALESCE(c.comments_count, 0) as comments_count,
         CASE WHEN ul.userEmail IS NOT NULL THEN true ELSE false END as liked_by_user
@@ -470,7 +479,10 @@ app.get("/feed/posts", async (req, res) => {
     query += ` ORDER BY p.isPinned DESC, p.createdAt DESC LIMIT ? OFFSET ?`;
     params.push(parseInt(limit), offset);
 
+    console.log("Executing query with params:", params);
     const [posts] = await pool.query(query, params);
+    
+    console.log(`Found ${posts.length} posts`);
 
     // Get mentions for each post
     for (let i = 0; i < posts.length; i++) {
@@ -479,6 +491,66 @@ app.get("/feed/posts", async (req, res) => {
         [posts[i].id]
       );
       posts[i].mentions = mentions.map(m => m.mentionedName);
+      
+      // Get media for each post
+      const [media] = await pool.query(
+        `SELECT * FROM FeedMedia WHERE postId = ?`,
+        [posts[i].id]
+      );
+      
+      // Set imageUrl/videoUrl from media
+      if (media.length > 0) {
+        const imageMedia = media.find(m => m.type === 'image');
+        const videoMedia = media.find(m => m.type === 'video');
+        
+        if (imageMedia) posts[i].imageUrl = imageMedia.url;
+        if (videoMedia) posts[i].videoUrl = videoMedia.url;
+      }
+      
+      // Get poll for each post
+      const [polls] = await pool.query(
+        `SELECT * FROM FeedPolls WHERE postId = ?`,
+        [posts[i].id]
+      );
+      
+      if (polls.length > 0) {
+        const poll = polls[0];
+        
+        // Get options for this poll
+        const [options] = await pool.query(
+          `SELECT * FROM FeedPollOptions WHERE pollId = ?`,
+          [poll.id]
+        );
+        
+        // Check if user has voted
+        let hasVoted = false;
+        if (userEmail) {
+          const [votes] = await pool.query(
+            `SELECT * FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
+            [poll.id, userEmail]
+          );
+          hasVoted = votes.length > 0;
+        }
+        
+        // Calculate percentages
+        const totalVotes = options.reduce((sum, opt) => sum + opt.votes, 0);
+        const optionsWithPercentages = options.map(opt => ({
+          id: opt.id,
+          text: opt.optionText,
+          votes: opt.votes,
+          percentage: totalVotes > 0 ? (opt.votes / totalVotes) * 100 : 0,
+          isSelected: false // Will be set on frontend
+        }));
+        
+        posts[i].poll = {
+          id: poll.id,
+          question: poll.question,
+          options: optionsWithPercentages,
+          multipleChoice: poll.multipleChoice || false,
+          endsAt: poll.endsAt,
+          hasVoted: hasVoted
+        };
+      }
     }
 
     // Parse attachments JSON
@@ -489,7 +561,8 @@ app.get("/feed/posts", async (req, res) => {
       expiresAt: post.expiresAt,
       likes: parseInt(post.likes_count) || 0,
       comments: parseInt(post.comments_count) || 0,
-      likedByUser: !!post.liked_by_user
+      likedByUser: !!post.liked_by_user,
+      mentions: post.mentions || []
     }));
 
     const [countResult] = await pool.query(
