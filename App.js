@@ -1367,6 +1367,152 @@ app.get("/feed/poll/votes", async (req, res) => {
   }
 });
 
+// CHANGE VOTE IN A POLL (UNVOTE THEN VOTE AGAIN)
+app.post("/feed/poll/change-vote", async (req, res) => {
+  const { db, pollId, oldOptionId, newOptionId, userEmail } = req.body;
+
+  if (!db || !pollId || !newOptionId || !userEmail) {
+    return res.status(400).json({
+      success: false,
+      message: "Database, pollId, newOptionId, and userEmail are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    // Check if poll exists
+    const [poll] = await pool.query(
+      `SELECT * FROM FeedPolls WHERE id = ?`,
+      [pollId]
+    );
+
+    if (poll.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Poll not found"
+      });
+    }
+
+    // Check if poll has expired
+    if (poll[0].endsAt && new Date(poll[0].endsAt) < new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: "This poll has ended"
+      });
+    }
+
+    // If oldOptionId is provided, remove the previous vote
+    if (oldOptionId) {
+      // Delete the old vote
+      await pool.query(
+        `DELETE FROM FeedPollVotes WHERE pollId = ? AND userEmail = ? AND optionId = ?`,
+        [pollId, userEmail, oldOptionId]
+      );
+
+      // Decrement vote count on the old option
+      await pool.query(
+        `UPDATE FeedPollOptions SET votes = votes - 1 WHERE id = ? AND votes > 0`,
+        [oldOptionId]
+      );
+    } else {
+      // If no oldOptionId, check if user already voted
+      const [existingVote] = await pool.query(
+        `SELECT * FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
+        [pollId, userEmail]
+      );
+
+      if (existingVote.length > 0) {
+        // User already voted, remove that vote first
+        const oldVote = existingVote[0];
+        await pool.query(
+          `DELETE FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
+          [pollId, userEmail]
+        );
+        
+        await pool.query(
+          `UPDATE FeedPollOptions SET votes = votes - 1 WHERE id = ? AND votes > 0`,
+          [oldVote.optionId]
+        );
+      }
+    }
+
+    // Insert new vote
+    const voteId = generatePostId();
+    await pool.query(
+      `INSERT INTO FeedPollVotes (id, pollId, optionId, userEmail, createdAt)
+       VALUES (?, ?, ?, ?, NOW())`,
+      [voteId, pollId, newOptionId, userEmail]
+    );
+
+    // Increment vote count on the new option
+    await pool.query(
+      `UPDATE FeedPollOptions SET votes = votes + 1 WHERE id = ?`,
+      [newOptionId]
+    );
+
+    // Get user info for notification
+    const [userRows] = await pool.query(
+      `SELECT name, lastName FROM Employees WHERE email = ?`,
+      [userEmail]
+    );
+
+    const userName = userRows.length > 0 
+      ? `${userRows[0].name} ${userRows[0].lastName}`
+      : userEmail;
+
+    // Get post author and post info
+    const [postRows] = await pool.query(
+      `SELECT p.authorEmail, p.id as postId, p.authorName
+       FROM FeedPosts p
+       JOIN FeedPolls pol ON p.id = pol.postId
+       WHERE pol.id = ?`,
+      [pollId]
+    );
+
+    if (postRows.length > 0 && postRows[0].authorEmail !== userEmail) {
+      // Get option text
+      const [optionRows] = await pool.query(
+        `SELECT optionText FROM FeedPollOptions WHERE id = ?`,
+        [newOptionId]
+      );
+      
+      const optionText = optionRows.length > 0 ? optionRows[0].optionText : 'a option';
+
+      // Notify post author
+      await pool.query(
+        `INSERT INTO Notifications 
+         (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'USER',
+          postRows[0].authorEmail,
+          userEmail,
+          '🔄 Vote changed in your poll',
+          `${userName} changed their vote to "${optionText}"`,
+          'POLL',
+          postRows[0].postId,
+          false,
+          new Date()
+        ]
+      );
+    }
+
+    return res.json({
+      success: true,
+      message: oldOptionId ? "Vote changed successfully" : "Vote recorded successfully"
+    });
+
+  } catch (err) {
+    console.error("❌ Error changing vote in poll:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error changing vote in poll",
+      error: err.message
+    });
+  }
+});
+
 // Delete post (author, Manager, AM only)
 app.delete("/feed/post/:postId", async (req, res) => {
   const { db, userEmail } = req.query;
