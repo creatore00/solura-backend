@@ -785,6 +785,67 @@ app.get("/feed/user-interactions", async (req, res) => {
   }
 });
 
+// Get employees for mentions (filtered by search term)
+app.get("/employees/search", async (req, res) => {
+  const { db, search, excludeEmail, limit = 10 } = req.query;
+
+  if (!db) {
+    return res.status(400).json({
+      success: false,
+      message: "Database is required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    let query = `
+      SELECT name, lastName, email, designation 
+      FROM Employees 
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (search && search.trim() !== '') {
+      const searchTerm = `%${search.trim()}%`;
+      query += ` AND (name LIKE ? OR lastName LIKE ? OR CONCAT(name, ' ', lastName) LIKE ? OR email LIKE ?)`;
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+
+    if (excludeEmail) {
+      query += ` AND email != ?`;
+      params.push(excludeEmail);
+    }
+
+    query += ` ORDER BY name, lastName LIMIT ?`;
+    params.push(parseInt(limit));
+
+    const [rows] = await pool.query(query, params);
+
+    const employees = rows.map(emp => ({
+      name: emp.name,
+      lastName: emp.lastName,
+      fullName: `${emp.name} ${emp.lastName}`,
+      email: emp.email,
+      designation: emp.designation || '',
+      avatar: emp.name.charAt(0) + (emp.lastName ? emp.lastName.charAt(0) : ''),
+      searchKey: `${emp.name} ${emp.lastName} ${emp.email}`.toLowerCase()
+    }));
+
+    return res.json({
+      success: true,
+      employees
+    });
+
+  } catch (err) {
+    console.error("Error searching employees:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error searching employees",
+      error: err.message
+    });
+  }
+});
+
 // ==================== EXISTING ENDPOINTS ====================
 
 // Health check
