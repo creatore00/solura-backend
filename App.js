@@ -120,7 +120,7 @@ function formatDate(dateString) {
 
 // Create a new feed post
 app.post("/feed/create", async (req, res) => {
-  const { db, authorEmail, content, attachments, visibility = 'all', expiresAt } = req.body;
+  const { db, authorEmail, content, attachments, visibility = 'all', mentions = [] } = req.body;
 
   if (!db || !authorEmail || !content) {
     return res.status(400).json({
@@ -150,9 +150,9 @@ app.post("/feed/create", async (req, res) => {
     const postId = generatePostId();
     const createdAt = new Date();
     
-    // Parse visibility (can be 'all', 'FOH', 'BOH', or specific roles)
     const visibilityStr = Array.isArray(visibility) ? visibility.join(',') : visibility;
 
+    // Inserisci il post
     await pool.query(
       `INSERT INTO FeedPosts (
         id, authorName, authorEmail, authorDesignation, content, 
@@ -161,30 +161,120 @@ app.post("/feed/create", async (req, res) => {
       [
         postId, authorName, authorEmail, author.designation || '',
         content, attachments ? JSON.stringify(attachments) : null,
-        visibilityStr, createdAt, expiresAt || null, false, true
+        visibilityStr, createdAt, null, false, true
       ]
     );
 
-    // Create notification for relevant users
-    const title = "New Feed Post";
-    const message = `${authorName} posted: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`;
+    // Set per tracciare utenti già notificati (evita duplicati)
+    const notifiedUsers = new Set();
+    
+    // 1. Crea notifiche per le menzioni
+    if (mentions && mentions.length > 0) {
+      for (const mention of mentions) {
+        // Pulisci il testo della menzione (rimuovi @ se presente)
+        const cleanMention = mention.replace('@', '').trim();
+        
+        if (cleanMention.length < 2) continue;
 
-    // Notify based on visibility
+        // Cerca l'impiegato in diversi modi
+        const [mentionedRows] = await pool.query(
+          `SELECT email, name, lastName, designation 
+           FROM Employees 
+           WHERE CONCAT(name, ' ', lastName) = ? 
+              OR CONCAT(name, lastName) = ?
+              OR email = ?
+              OR email LIKE ?
+              OR name LIKE ?
+              OR lastName LIKE ?
+           LIMIT 1`,
+          [
+            cleanMention, 
+            cleanMention.replace(' ', ''), 
+            cleanMention,
+            `%${cleanMention}%`,
+            `%${cleanMention}%`,
+            `%${cleanMention}%`
+          ]
+        );
+
+        for (const mentionedUser of mentionedRows) {
+          // Non notificare l'autore del post
+          if (mentionedUser.email !== authorEmail && !notifiedUsers.has(mentionedUser.email)) {
+            notifiedUsers.add(mentionedUser.email);
+            
+            try {
+              await pool.query(
+                `INSERT INTO Notifications 
+                 (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                  'USER', 
+                  mentionedUser.email,
+                  authorEmail,
+                  '📢 You were mentioned in a post',
+                  `${authorName} mentioned you: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`,
+                  'MENTION',
+                  postId,
+                  false,
+                  new Date()
+                ]
+              );
+              console.log(`Mention notification sent to: ${mentionedUser.email}`);
+            } catch (notifError) {
+              console.error("Error inserting mention notification:", notifError);
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Crea notifiche generali per il feed (solo se non è già stata inviata una menzione)
+    const title = "📱 New Feed Post";
+    const message = `${authorName} posted: "${content.substring(0, 100)}${content.length > 100 ? '...' : ''}"`;
+
     if (visibility === 'all') {
-      await pool.query(
-        `INSERT INTO Notifications (targetRole, title, message, type, postId)
-         VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`,
-        ['FOH', title, message, 'FEED', postId, 'BOH', title, message, 'FEED', postId]
-      );
+      // Notifica FOH e BOH
+      try {
+        await pool.query(
+          `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ['FOH', title, message, 'FEED', postId, authorEmail, false, new Date()]
+        );
+        
+        await pool.query(
+          `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ['BOH', title, message, 'FEED', postId, authorEmail, false, new Date()]
+        );
+        
+        // Notifica anche Manager e AM se esistono
+        await pool.query(
+          `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ['Manager', title, message, 'FEED', postId, authorEmail, false, new Date()]
+        );
+        
+        await pool.query(
+          `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ['AM', title, message, 'FEED', postId, authorEmail, false, new Date()]
+        );
+      } catch (notifError) {
+        console.error("Error inserting feed notifications:", notifError);
+      }
     } else {
       const targets = Array.isArray(visibility) ? visibility : [visibility];
       for (const target of targets) {
         if (target && target !== 'all') {
-          await pool.query(
-            `INSERT INTO Notifications (targetRole, title, message, type, postId)
-             VALUES (?, ?, ?, ?, ?)`,
-            [target, title, message, 'FEED', postId]
-          );
+          try {
+            await pool.query(
+              `INSERT INTO Notifications (targetRole, title, message, type, postId, authorEmail, isRead, createdAt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              [target, title, message, 'FEED', postId, authorEmail, false, new Date()]
+            );
+          } catch (notifError) {
+            console.error(`Error inserting notification for ${target}:`, notifError);
+          }
         }
       }
     }
@@ -205,7 +295,8 @@ app.post("/feed/create", async (req, res) => {
         isPinned: false,
         likes: 0,
         comments: 0,
-        likedByUser: false
+        likedByUser: false,
+        mentions: Array.from(notifiedUsers)
       }
     });
 
@@ -1848,29 +1939,100 @@ app.post("/holidays/decide", async (req, res) => {
 
 // Get notifications
 app.get("/notifications", async (req, res) => {
-  const { db, role } = req.query;
+  const { db, role, userEmail } = req.query;
 
-  if (!db || !role) {
-    return res.status(400).json({ success: false, message: "db and role are required" });
+  if (!db) {
+    return res.status(400).json({ success: false, message: "db is required" });
   }
 
   try {
     const pool = getPool(db);
+    
+    let query = `
+      SELECT id, targetRole, targetEmail, authorEmail, title, message, type, 
+             isRead, postId, createdAt
+      FROM Notifications 
+      WHERE 1=1
+    `;
+    const params = [];
 
-    const [rows] = await pool.query(
-      `SELECT id, title, message, type, isRead,
-              DATE_FORMAT(CONVERT_TZ(createdAt, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z') as createdAt
-       FROM Notifications
-       WHERE targetRole = ? OR targetRole = 'ALL'
-       ORDER BY id DESC
-       LIMIT 50`,
-      [role]
-    );
+    // Filtra per ruolo O email specifica
+    if (role) {
+      query += ` AND (targetRole = ? OR targetRole = 'ALL')`;
+      params.push(role);
+    }
+    
+    if (userEmail) {
+      query += ` OR targetEmail = ?`;
+      params.push(userEmail);
+    }
 
-    res.json({ success: true, notifications: rows });
+    query += ` ORDER BY id DESC LIMIT 50`;
+
+    const [rows] = await pool.query(query, params);
+
+    // Formatta le date per il frontend
+    const notifications = rows.map(row => ({
+      ...row,
+      createdAt: row.createdAt ? row.createdAt.toISOString() : null
+    }));
+
+    res.json({ 
+      success: true, 
+      notifications 
+    });
+
   } catch (err) {
     console.error("Error fetching notifications:", err);
-    res.status(500).json({ success: false, message: "Server error fetching notifications" });
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error fetching notifications",
+      error: err.message 
+    });
+  }
+});
+
+// Get unread count
+app.get("/notifications/unread-count", async (req, res) => {
+  const { db, role, userEmail } = req.query;
+
+  if (!db) {
+    return res.status(400).json({ success: false, message: "db is required" });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    let query = `
+      SELECT COUNT(*) as count 
+      FROM Notifications 
+      WHERE isRead = 0
+    `;
+    const params = [];
+
+    if (role) {
+      query += ` AND (targetRole = ? OR targetRole = 'ALL')`;
+      params.push(role);
+    }
+    
+    if (userEmail) {
+      query += ` OR targetEmail = ?`;
+      params.push(userEmail);
+    }
+
+    const [result] = await pool.query(query, params);
+
+    res.json({ 
+      success: true, 
+      count: result[0].count 
+    });
+
+  } catch (err) {
+    console.error("Error fetching unread count:", err);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error fetching unread count" 
+    });
   }
 });
 
@@ -1899,42 +2061,6 @@ app.post("/notifications/read", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Server error"
-    });
-  }
-});
-
-// Get unread notification count
-app.get("/notifications/unread-count", async (req, res) => {
-  const { db, role } = req.query;
-
-  if (!db || !role) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "db and role are required" 
-    });
-  }
-
-  try {
-    const pool = getPool(db);
-
-    const [result] = await pool.query(
-      `SELECT COUNT(*) as count 
-       FROM Notifications 
-       WHERE (targetRole = ? OR targetRole = 'ALL') 
-       AND isRead = 0`,
-      [role]
-    );
-
-    res.json({ 
-      success: true, 
-      count: result[0].count 
-    });
-
-  } catch (err) {
-    console.error("Error fetching unread count:", err);
-    res.status(500).json({ 
-      success: false, 
-      message: "Server error fetching unread count" 
     });
   }
 });
