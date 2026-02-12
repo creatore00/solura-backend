@@ -876,12 +876,14 @@ app.get("/feed/likes", async (req, res) => {
       userEmail: like.userEmail,
       userName: like.name && like.lastName ? `${like.name} ${like.lastName}` : like.userEmail,
       designation: like.designation || '',
-      createdAt: like.createdAt
+      createdAt: like.createdAt,
+      timeAgo: _timeAgo(like.createdAt)
     }));
 
     return res.json({
       success: true,
-      likes: formattedLikes
+      likes: formattedLikes,
+      total: formattedLikes.length
     });
 
   } catch (err) {
@@ -893,6 +895,18 @@ app.get("/feed/likes", async (req, res) => {
     });
   }
 });
+
+// Helper function for time ago
+function _timeAgo(date) {
+  const now = new Date();
+  const diff = Math.floor((now - new Date(date)) / 1000);
+  
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(date).toLocaleDateString();
+}
 
 // Add comment to post
 app.post("/feed/comment", async (req, res) => {
@@ -1113,6 +1127,7 @@ app.delete("/feed/comment/:commentId", async (req, res) => {
       });
     }
 
+    // Delete comment - foreign key cascade will delete replies and reactions
     await pool.query(
       "DELETE FROM FeedComments WHERE id = ?",
       [commentId]
@@ -1131,10 +1146,416 @@ app.delete("/feed/comment/:commentId", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Error deleting comment:", err);
+    console.error("❌ Error deleting comment:", err);
     return res.status(500).json({
       success: false,
       message: "Server error deleting comment",
+      error: err.message
+    });
+  }
+});
+
+// ADD COMMENT WITH PARENT (REPLY)
+app.post("/feed/comment", async (req, res) => {
+  const { db, postId, userEmail, content, parentCommentId } = req.body;
+
+  if (!db || !postId || !userEmail || !content) {
+    return res.status(400).json({
+      success: false,
+      message: "Database, postId, userEmail, and content are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    const commentId = generateUniqueCode();
+
+    // Get user info
+    const [userRows] = await pool.query(
+      "SELECT name, lastName, designation FROM Employees WHERE email = ?",
+      [userEmail]
+    );
+
+    if (!userRows || userRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    const user = userRows[0];
+    const userName = `${user.name} ${user.lastName}`;
+
+    // Insert comment with optional parentCommentId
+    await pool.query(
+      `INSERT INTO FeedComments (id, postId, parentCommentId, userEmail, userName, userDesignation, content, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        commentId, 
+        postId, 
+        parentCommentId || null, 
+        userEmail, 
+        userName, 
+        user.designation || '', 
+        content
+      ]
+    );
+
+    // Get post author for notification
+    const [postRows] = await pool.query(
+      "SELECT authorName, authorEmail FROM FeedPosts WHERE id = ?",
+      [postId]
+    );
+
+    if (postRows.length > 0) {
+      const post = postRows[0];
+      
+      // Determine notification recipient
+      let notifyEmail = post.authorEmail;
+      let notifyMessage = `${userName} commented on your post`;
+      
+      if (parentCommentId) {
+        // Get parent comment author
+        const [parentRows] = await pool.query(
+          `SELECT userEmail, userName FROM FeedComments WHERE id = ?`,
+          [parentCommentId]
+        );
+        
+        if (parentRows.length > 0 && parentRows[0].userEmail !== userEmail) {
+          notifyEmail = parentRows[0].userEmail;
+          notifyMessage = `${userName} replied to your comment`;
+        }
+      }
+
+      // Create notification
+      if (notifyEmail !== userEmail) {
+        await pool.query(
+          `INSERT INTO Notifications 
+           (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            'USER',
+            notifyEmail,
+            userEmail,
+            parentCommentId ? '💬 New Reply' : '💬 New Comment',
+            `${notifyMessage}: "${content.substring(0, 50)}${content.length > 50 ? '...' : ''}"`,
+            'COMMENT',
+            postId,
+            false,
+            new Date()
+          ]
+        );
+      }
+    }
+
+    // Get updated comment count
+    const [countResult] = await pool.query(
+      "SELECT COUNT(*) as count FROM FeedComments WHERE postId = ?",
+      [postId]
+    );
+
+    return res.json({
+      success: true,
+      message: "Comment added successfully",
+      comment: {
+        id: commentId,
+        postId,
+        parentCommentId: parentCommentId || null,
+        userEmail,
+        userName,
+        userDesignation: user.designation,
+        content,
+        createdAt: new Date(),
+        reactions: [],
+        replies: []
+      },
+      comments: countResult[0].count
+    });
+
+  } catch (err) {
+    console.error("❌ Error adding comment:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error adding comment",
+      error: err.message
+    });
+  }
+});
+
+// GET COMMENTS WITH REPLIES AND REACTIONS
+app.get("/feed/comments", async (req, res) => {
+  const { db, postId } = req.query;
+
+  if (!db || !postId) {
+    return res.status(400).json({
+      success: false,
+      message: "Database and postId are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    // Get all comments for the post
+    const [comments] = await pool.query(
+      `SELECT c.*, 
+              e.name, e.lastName, e.designation
+       FROM FeedComments c
+       LEFT JOIN Employees e ON c.userEmail = e.email
+       WHERE c.postId = ?
+       ORDER BY c.createdAt ASC`,
+      [postId]
+    );
+
+    // Get all reactions for these comments
+    const commentIds = comments.map(c => c.id);
+    let reactions = [];
+    
+    if (commentIds.length > 0) {
+      const [reactionRows] = await pool.query(
+        `SELECT * FROM CommentReactions 
+         WHERE commentId IN (?) 
+         ORDER BY createdAt ASC`,
+        [commentIds]
+      );
+      reactions = reactionRows;
+    }
+
+    // Group reactions by comment
+    const reactionsByComment = {};
+    for (const reaction of reactions) {
+      if (!reactionsByComment[reaction.commentId]) {
+        reactionsByComment[reaction.commentId] = [];
+      }
+      reactionsByComment[reaction.commentId].push(reaction);
+    }
+
+    // Format comments and group by parent
+    const commentsMap = {};
+    const topComments = [];
+
+    for (const comment of comments) {
+      const formattedComment = {
+        id: comment.id,
+        postId: comment.postId,
+        parentCommentId: comment.parentCommentId,
+        userEmail: comment.userEmail,
+        userName: comment.userName || (comment.name && comment.lastName ? `${comment.name} ${comment.lastName}` : comment.userEmail),
+        userDesignation: comment.userDesignation || comment.designation || '',
+        content: comment.content,
+        createdAt: comment.createdAt,
+        reactions: _groupReactions(reactionsByComment[comment.id] || []),
+        replies: []
+      };
+      
+      commentsMap[comment.id] = formattedComment;
+      
+      if (!comment.parentCommentId) {
+        topComments.push(formattedComment);
+      }
+    }
+
+    // Attach replies to parent comments
+    for (const comment of comments) {
+      if (comment.parentCommentId && commentsMap[comment.parentCommentId]) {
+        commentsMap[comment.parentCommentId].replies.push(
+          commentsMap[comment.id]
+        );
+      }
+    }
+
+    // Sort replies by date
+    for (const comment of topComments) {
+      comment.replies.sort((a, b) => 
+        new Date(a.createdAt) - new Date(b.createdAt)
+      );
+    }
+
+    return res.json({
+      success: true,
+      comments: topComments
+    });
+
+  } catch (err) {
+    console.error("❌ Error fetching comments:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching comments",
+      error: err.message
+    });
+  }
+});
+
+// Helper function to group reactions
+function _groupReactions(reactions) {
+  const grouped = {};
+  let userReaction = null;
+  
+  for (const reaction of reactions) {
+    if (!grouped[reaction.emoji]) {
+      grouped[reaction.emoji] = 0;
+    }
+    grouped[reaction.emoji]++;
+  }
+  
+  return {
+    counts: grouped,
+    total: reactions.length
+  };
+}
+
+// TOGGLE REACTION ON COMMENT
+app.post("/feed/comment/reaction", async (req, res) => {
+  const { db, commentId, userEmail, emoji } = req.body;
+
+  if (!db || !commentId || !userEmail || !emoji) {
+    return res.status(400).json({
+      success: false,
+      message: "Database, commentId, userEmail, and emoji are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    // Check if reaction already exists
+    const [existingReaction] = await pool.query(
+      `SELECT * FROM CommentReactions 
+       WHERE commentId = ? AND userEmail = ? AND emoji = ?`,
+      [commentId, userEmail, emoji]
+    );
+
+    if (existingReaction.length > 0) {
+      // Remove reaction
+      await pool.query(
+        `DELETE FROM CommentReactions 
+         WHERE commentId = ? AND userEmail = ? AND emoji = ?`,
+        [commentId, userEmail, emoji]
+      );
+      
+      return res.json({
+        success: true,
+        message: "Reaction removed",
+        action: 'removed'
+      });
+    } else {
+      // Add reaction
+      const reactionId = generatePostId();
+      await pool.query(
+        `INSERT INTO CommentReactions (id, commentId, userEmail, emoji, createdAt)
+         VALUES (?, ?, ?, ?, NOW())`,
+        [reactionId, commentId, userEmail, emoji]
+      );
+
+      // Get comment author for notification
+      const [commentRows] = await pool.query(
+        `SELECT c.userEmail, c.userName, p.authorEmail, p.id as postId
+         FROM FeedComments c
+         JOIN FeedPosts p ON c.postId = p.id
+         WHERE c.id = ?`,
+        [commentId]
+      );
+
+      if (commentRows.length > 0 && commentRows[0].userEmail !== userEmail) {
+        // Get user's name for notification
+        const [userRows] = await pool.query(
+          `SELECT name, lastName FROM Employees WHERE email = ?`,
+          [userEmail]
+        );
+
+        const userName = userRows.length > 0 
+          ? `${userRows[0].name} ${userRows[0].lastName}`
+          : userEmail;
+
+        // Notify comment author
+        await pool.query(
+          `INSERT INTO Notifications 
+           (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            'USER',
+            commentRows[0].userEmail,
+            userEmail,
+            '😊 New Reaction',
+            `${userName} reacted with ${emoji} to your comment`,
+            'REACTION',
+            commentRows[0].postId,
+            false,
+            new Date()
+          ]
+        );
+      }
+
+      return res.json({
+        success: true,
+        message: "Reaction added",
+        action: 'added'
+      });
+    }
+
+  } catch (err) {
+    console.error("❌ Error toggling reaction:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error toggling reaction",
+      error: err.message
+    });
+  }
+});
+
+// GET REACTIONS FOR COMMENT
+app.get("/feed/comment/reactions", async (req, res) => {
+  const { db, commentId } = req.query;
+
+  if (!db || !commentId) {
+    return res.status(400).json({
+      success: false,
+      message: "Database and commentId are required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    const [reactions] = await pool.query(
+      `SELECT r.*, e.name, e.lastName, e.designation
+       FROM CommentReactions r
+       LEFT JOIN Employees e ON r.userEmail = e.email
+       WHERE r.commentId = ?
+       ORDER BY r.createdAt DESC`,
+      [commentId]
+    );
+
+    const formattedReactions = reactions.map(r => ({
+      id: r.id,
+      userEmail: r.userEmail,
+      userName: r.name && r.lastName ? `${r.name} ${r.lastName}` : r.userEmail,
+      designation: r.designation || '',
+      emoji: r.emoji,
+      createdAt: r.createdAt
+    }));
+
+    // Group by emoji
+    const grouped = {};
+    for (const reaction of formattedReactions) {
+      if (!grouped[reaction.emoji]) {
+        grouped[reaction.emoji] = [];
+      }
+      grouped[reaction.emoji].push(reaction);
+    }
+
+    return res.json({
+      success: true,
+      reactions: formattedReactions,
+      grouped: grouped,
+      total: formattedReactions.length
+    });
+
+  } catch (err) {
+    console.error("❌ Error fetching reactions:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching reactions",
       error: err.message
     });
   }
