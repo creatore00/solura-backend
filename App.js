@@ -914,11 +914,12 @@ function _toTinyInt(v) {
 }
 
 // Helper: group reactions (frontend expects {counts:{}, total:int})
-function _groupReactions(reactions) {
+function _groupReactions(reactions = []) {
   const grouped = {};
-  for (nconst of reactions) {
-    if (!grouped[nconst.emoji]) grouped[nconst.emoji] = 0;
-    grouped[nconst.emoji]++;
+  for (const reaction of reactions) {
+    const emoji = reaction?.emoji;
+    if (!emoji) continue;
+    grouped[emoji] = (grouped[emoji] || 0) + 1;
   }
   return { counts: grouped, total: reactions.length };
 }
