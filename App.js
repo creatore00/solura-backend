@@ -20,6 +20,42 @@ function generateUniqueCode() {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// ✅ checks BOTH ShiftRequests + rota for collisions
+async function generateUniqueShiftId(conn) {
+  while (true) {
+    const id = generateUniqueCode();
+
+    const [a] = await conn.query(`SELECT id FROM ShiftRequests WHERE id = ? LIMIT 1`, [id]);
+    if (a && a.length > 0) continue;
+
+    const [b] = await conn.query(`SELECT id FROM rota WHERE id = ? LIMIT 1`, [id]);
+    if (b && b.length > 0) continue;
+
+    return id;
+  }
+}
+
+function toHHMMSS(input) {
+  // Accept "HH:mm" or "HH:mm:ss" -> return "HH:mm:ss"
+  const s = String(input || "").trim();
+  if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s;
+  if (/^\d{2}:\d{2}$/.test(s)) return `${s}:00`;
+  return null;
+}
+
+function formatDayLabel(dateStr) {
+  // dateStr expected "YYYY-MM-DD"
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+
+  const weekday = d.toLocaleDateString("en-GB", { weekday: "long" });
+  return `${dd}/${mm}/${yyyy} (${weekday})`;
+}
+
 // Helper function to ensure time has seconds
 function ensureTimeWithSeconds(time) {
   if (!time) return '00:00:00';
@@ -30,6 +66,22 @@ function ensureTimeWithSeconds(time) {
     }
   }
   return time;
+}
+
+async function getUserAccessFromMainDB({ authPool, email, db }) {
+  const e = String(email).trim().toLowerCase();
+
+  const [rows] = await authPool.query(
+    `SELECT TRIM(LOWER(COALESCE(\`Access\`, ''))) AS access
+     FROM users
+     WHERE (LOWER(TRIM(\`Email\`)) = ? OR LOWER(TRIM(email)) = ?)
+       AND TRIM(LOWER(db_name)) = TRIM(LOWER(?))
+     LIMIT 1`,
+    [e, e, db]
+  );
+
+  if (!rows || rows.length === 0) return { found: false, access: "" };
+  return { found: true, access: rows[0].access || "" };
 }
 
 // Helper function to generate unique post ID
@@ -115,6 +167,255 @@ function formatDate(dateString) {
     return dateString;
   }
 }
+
+// ==================== SHIFTS REQUESTS ====================
+
+app.post("/rota/shift-request", async (req, res) => {
+  const { db, userEmail, dayDate, startTime, endTime, neededFor } = req.body;
+
+  if (!db || !userEmail || !dayDate || !startTime || !endTime) {
+    return res.status(400).json({ success: false, message: "Missing required fields" });
+  }
+
+  const authPool = pool;                // ✅ MAIN DB (yassir_access)
+  const workspacePool = getPool(db);    // ✅ WORKSPACE DB
+  const conn = await workspacePool.getConnection();
+
+  try {
+    const accessInfo = await getUserAccessFromMainDB({ authPool, email: userEmail, db });
+
+    console.log("🔎 CREATE SHIFT CHECK:", { db, userEmail, accessInfo });
+
+    if (!accessInfo.found) {
+      conn.release();
+      return res.status(403).json({ success: false, message: "User not found for workspace" });
+    }
+
+    const access = accessInfo.access; // already lower-case
+    const canCreate = ["admin", "am", "assistant manager"].includes(access);
+
+    if (!canCreate) {
+      conn.release();
+      return res.status(403).json({
+        success: false,
+        message: `Not allowed to create shift. Access='${access}'`,
+      });
+    }
+
+    // normalize HH:mm -> HH:mm:ss
+    const toHHMMSS = (s) => {
+      s = String(s || "").trim();
+      if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s;
+      if (/^\d{2}:\d{2}$/.test(s)) return `${s}:00`;
+      return null;
+    };
+
+    const st = toHHMMSS(startTime);
+    const et = toHHMMSS(endTime);
+    if (!st || !et) {
+      conn.release();
+      return res.status(400).json({ success: false, message: "Times must be HH:mm or HH:mm:ss" });
+    }
+
+    // day label "dd/mm/yyyy (Day)"
+    const formatDayLabel = (dateStr) => {
+      const d = new Date(`${dateStr}T00:00:00`);
+      if (Number.isNaN(d.getTime())) return null;
+      const dd = String(d.getDate()).padStart(2, "0");
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const yyyy = d.getFullYear();
+      const weekday = d.toLocaleDateString("en-GB", { weekday: "long" });
+      return `${dd}/${mm}/${yyyy} (${weekday})`;
+    };
+
+    const dayLabel = formatDayLabel(dayDate);
+    if (!dayLabel) {
+      conn.release();
+      return res.status(400).json({ success: false, message: "dayDate must be YYYY-MM-DD" });
+    }
+
+    const needed = ["foh", "boh", "anyone"].includes(String(neededFor).toLowerCase())
+      ? String(neededFor).toLowerCase()
+      : "anyone";
+
+    const id = await generateUniqueShiftId(conn);
+
+    await conn.query(
+      `INSERT INTO ShiftRequests
+       (id, day_date, day_label, start_time, end_time, needed_for, status, created_by_email)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      [id, dayDate, dayLabel, st, et, needed, String(userEmail).trim().toLowerCase()]
+    );
+
+    conn.release();
+
+    console.log(`✅ Shift request created | db=${db} | id=${id} | by=${userEmail} | access=${access}`);
+
+    return res.json({ success: true, message: "Shift request created", id });
+  } catch (err) {
+    conn.release();
+    console.error("❌ Error creating shift request:", err);
+    return res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
+
+app.get("/rota/shift-requests", async (req, res) => {
+  const { db } = req.query;
+
+  if (!db) {
+    return res.status(400).json({ success: false, message: "db is required" });
+  }
+
+  try {
+    const workspacePool = getPool(db);
+
+    const [rows] = await workspacePool.query(
+      `SELECT id, day_date, day_label, start_time, end_time, needed_for, status,
+              created_by_email, created_at,
+              accepted_by_email, accepted_first_name, accepted_last_name, accepted_at
+       FROM ShiftRequests
+       WHERE status IN ('pending','accepted')
+       ORDER BY
+         (status='pending') DESC,
+         day_date ASC,
+         start_time ASC`
+    );
+
+    return res.json({ success: true, shifts: rows });
+  } catch (err) {
+    console.error("❌ Error fetching shift requests:", err);
+    return res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
+
+app.post("/rota/shift-request/:id/accept", async (req, res) => {
+  const { db, userEmail } = req.body;
+  const { id } = req.params;
+
+  if (!db || !id || !userEmail) {
+    return res.status(400).json({
+      success: false,
+      message: "db, id, userEmail are required",
+    });
+  }
+
+  const email = String(userEmail).trim().toLowerCase();
+  const workspacePool = getPool(db);
+  const conn = await workspacePool.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    // 1) Lock the shift request
+    const [reqRows] = await conn.query(
+      `SELECT id, day_label, start_time, end_time, needed_for, status
+       FROM ShiftRequests
+       WHERE id = ?
+       FOR UPDATE`,
+      [id]
+    );
+
+    if (!reqRows || reqRows.length === 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(404).json({ success: false, message: "Shift request not found" });
+    }
+
+    const shift = reqRows[0];
+
+    if (shift.status !== "pending") {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ success: false, message: "Shift already accepted/cancelled" });
+    }
+
+    // 2) Get employee data from WORKSPACE DB
+    const [empRows] = await conn.query(
+      `SELECT 
+         TRIM(COALESCE(name,''))     AS name,
+         TRIM(COALESCE(lastName,'')) AS lastName,
+         TRIM(UPPER(COALESCE(designation,''))) AS designation
+       FROM Employees
+       WHERE LOWER(TRIM(email)) = ? OR LOWER(TRIM(\`Email\`)) = ?
+       LIMIT 1`,
+      [email, email]
+    );
+
+    console.log("🔎 ACCEPT SHIFT EMP CHECK:", { db, id, email, emp: empRows?.[0] || null });
+
+    if (!empRows || empRows.length === 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(403).json({
+        success: false,
+        message: "Employee not found in this workspace",
+      });
+    }
+
+    const emp = empRows[0];
+    const empDesignation = String(emp.designation || "").trim().toUpperCase(); // FOH/BOH/AM/ADMIN...
+
+    // 3) Eligibility
+    const neededFor = String(shift.needed_for || "anyone").toLowerCase();
+
+    const eligible =
+      neededFor === "anyone" ||
+      (neededFor === "foh" && empDesignation === "FOH") ||
+      (neededFor === "boh" && empDesignation === "BOH");
+
+    if (!eligible) {
+      await conn.rollback();
+      conn.release();
+      return res.status(403).json({
+        success: false,
+        message: `Not eligible. neededFor='${neededFor}', designation='${empDesignation}'`,
+      });
+    }
+
+    // 4) Safety: rota id collision check
+    const [rotaExists] = await conn.query(`SELECT id FROM rota WHERE id = ? LIMIT 1`, [id]);
+    if (rotaExists && rotaExists.length > 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({
+        success: false,
+        message: `Shift id already exists in rota. id='${id}'`,
+      });
+    }
+
+    // 5) Mark request accepted
+    await conn.query(
+      `UPDATE ShiftRequests
+       SET status='accepted',
+           accepted_by_email=?,
+           accepted_first_name=?,
+           accepted_last_name=?,
+           accepted_at=NOW()
+       WHERE id=?`,
+      [email, emp.name, emp.lastName, id]
+    );
+
+    // 6) Insert into rota (YOUR columns)
+    await conn.query(
+      `INSERT INTO rota
+       (id, name, lastName, day, startTime, endTime, designation)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, emp.name, emp.lastName, shift.day_label, shift.start_time, shift.end_time, empDesignation]
+    );
+
+    await conn.commit();
+    conn.release();
+
+    console.log(`✅ Shift accepted + inserted into rota | db=${db} | id=${id} | by=${email} | ${emp.name} ${emp.lastName} | ${empDesignation}`);
+
+    return res.json({ success: true, message: "Shift accepted", id });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    conn.release();
+    console.error("❌ Error accepting shift:", err);
+    return res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
 
 // ==================== FEED ENDPOINTS ====================
 
