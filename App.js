@@ -1382,8 +1382,6 @@ app.get("/feed/comment/reactions", async (req, res) => {
 
 // Pin/unpin post (Manager/AM only)
 app.post("/feed/pin", async (req, res) => {
-  console.log("🔥 HIT /feed/pin ROUTE v2", req.body);
-
   const { db, postId, userEmail, pin } = req.body;
 
   if (!db || !postId || !userEmail) {
@@ -1393,38 +1391,55 @@ app.post("/feed/pin", async (req, res) => {
     });
   }
 
-  try {
-    const pool = getPool(db);
+  const email = String(userEmail).trim().toLowerCase();
 
-    // ✅ normalize Access in SQL so AM / am both work
-    const [userRows] = await pool.query(
-      `SELECT LOWER(Access) AS access
+  // ✅ MAIN pool (yassir_access) — same as /login
+  const authPool = pool;
+
+  // ✅ WORKSPACE pool (Feed tables)
+  const workspacePool = getPool(db);
+
+  try {
+    // 1) Permission check from MAIN DB
+    const [userRows] = await authPool.query(
+      `SELECT TRIM(LOWER(COALESCE(\`Access\`, ''))) AS access
        FROM users
-       WHERE (Email = ? OR email = ?)
-         AND db_name = ?`,
-      [userEmail, userEmail, db]
+       WHERE (LOWER(TRIM(\`Email\`)) = ? OR LOWER(TRIM(email)) = ?)
+         AND TRIM(LOWER(db_name)) = TRIM(LOWER(?))
+       LIMIT 1`,
+      [email, email, db]
     );
 
-    const access = (userRows?.[0]?.access || "").toString().trim(); // already lowercase
-    console.log("✅ PIN access lookup:", { userEmail, db, access });
+    console.log("🔎 PIN CHECK (MAIN DB yassir_access):", {
+      db,
+      postId,
+      email,
+      matchedRows: userRows?.length || 0,
+      row: userRows?.[0] || null,
+    });
 
-    // ✅ ONLY AM + admin can pin
-    const canPin = ["am", "admin"].includes(access);
-
-    if (!canPin) {
-      console.log("⛔ PIN denied:", { userEmail, db, access });
+    if (!userRows || userRows.length === 0) {
       return res.status(403).json({
         success: false,
-        message: `Not allowed to pin. Access='${access}'`,
+        message: `User not found for this workspace`,
       });
     }
 
+    const access = userRows[0].access; // normalized
+    const canPin = ["admin", "am", "assistant manager"].includes(access);
+
+    if (!canPin) {
+      return res.status(403).json({
+        success: false,
+        message: `Only admin/AM can pin/unpin posts. Access='${access}'`,
+      });
+    }
+
+    // 2) Update post in WORKSPACE DB
     const pinVal = pin ? 1 : 0;
 
-    const [result] = await pool.query(
-      `UPDATE FeedPosts
-       SET isPinned = ?
-       WHERE id = ? AND isActive = true`,
+    const [result] = await workspacePool.query(
+      `UPDATE FeedPosts SET isPinned = ? WHERE id = ? AND isActive = true`,
       [pinVal, postId]
     );
 
@@ -1433,7 +1448,7 @@ app.post("/feed/pin", async (req, res) => {
     }
 
     console.log(
-      `✅ Post ${pinVal === 1 ? "pinned" : "unpinned"} successfully | db=${db} | postId=${postId} | by=${userEmail} | access=${access}`
+      `✅ Post ${pinVal === 1 ? "pinned" : "unpinned"} successfully | db=${db} | postId=${postId} | by=${email} | access=${access}`
     );
 
     return res.json({
@@ -1658,11 +1673,17 @@ app.delete("/feed/post/:postId", async (req, res) => {
     });
   }
 
-  const pool = getPool(db);
-  const conn = await pool.getConnection();
+  const email = String(userEmail).trim().toLowerCase();
+
+  // ✅ MAIN pool (yassir_access)
+  const authPool = pool;
+
+  // ✅ WORKSPACE pool (Feed tables)
+  const workspacePool = getPool(db);
+  const conn = await workspacePool.getConnection();
 
   try {
-    // 1) Check post exists
+    // 1) Post exists?
     const [postRows] = await conn.query(
       `SELECT id FROM FeedPosts WHERE id = ?`,
       [postId]
@@ -1673,14 +1694,23 @@ app.delete("/feed/post/:postId", async (req, res) => {
       return res.status(404).json({ success: false, message: "Post not found" });
     }
 
-    // 2) AM check ONLY
-    const [userRows] = await conn.query(
-      `SELECT LOWER(Access) AS access
+    // 2) Permission check from MAIN DB
+    const [userRows] = await authPool.query(
+      `SELECT TRIM(LOWER(COALESCE(\`Access\`, ''))) AS access
        FROM users
-       WHERE (Email = ? OR email = ?)
-         AND db_name = ?`,
-      [userEmail, userEmail, db]
+       WHERE (LOWER(TRIM(\`Email\`)) = ? OR LOWER(TRIM(email)) = ?)
+         AND TRIM(LOWER(db_name)) = TRIM(LOWER(?))
+       LIMIT 1`,
+      [email, email, db]
     );
+
+    console.log("🔎 DELETE CHECK (MAIN DB yassir_access):", {
+      db,
+      postId,
+      email,
+      matchedRows: userRows?.length || 0,
+      row: userRows?.[0] || null,
+    });
 
     if (!userRows || userRows.length === 0) {
       conn.release();
@@ -1690,20 +1720,20 @@ app.delete("/feed/post/:postId", async (req, res) => {
       });
     }
 
-    const access = (userRows[0].access || "").toString().trim(); // already lowercase
-    const isAM = ["am", "assistant manager"].includes(access);
+    const access = userRows[0].access;
+    const canDelete = ["am", "assistant manager"].includes(access); // ✅ AM only
 
-    if (!isAM) {
+    if (!canDelete) {
       conn.release();
       return res.status(403).json({
         success: false,
-        message: "Only AM can delete posts",
+        message: `Only AM can delete posts. Access='${access}'`,
       });
     }
 
     await conn.beginTransaction();
 
-    // 3) Delete reactions for comments in this post
+    // 3) Delete comment reactions for this post
     await conn.query(
       `DELETE cr
        FROM CommentReactions cr
@@ -1712,7 +1742,7 @@ app.delete("/feed/post/:postId", async (req, res) => {
       [postId]
     );
 
-    // 4) Delete comments (includes replies)
+    // 4) Delete comments
     await conn.query(`DELETE FROM FeedComments WHERE postId = ?`, [postId]);
 
     // 5) Delete likes
@@ -1737,14 +1767,14 @@ app.delete("/feed/post/:postId", async (req, res) => {
       await conn.query(`DELETE FROM FeedPolls WHERE id = ?`, [pollId]);
     }
 
-    // 9) Delete the post
+    // 9) Delete post
     await conn.query(`DELETE FROM FeedPosts WHERE id = ?`, [postId]);
 
     await conn.commit();
     conn.release();
 
     console.log(
-      `✅ Post deleted successfully | db=${db} | postId=${postId} | by=${userEmail} | access=${access}`
+      `✅ Post deleted successfully | db=${db} | postId=${postId} | by=${email} | access=${access}`
     );
 
     return res.json({ success: true, message: "Post deleted successfully" });
