@@ -1646,49 +1646,101 @@ app.delete("/feed/post/:postId", async (req, res) => {
     });
   }
 
-  try {
-    const pool = getPool(db);
+  const pool = getPool(db);
+  const conn = await pool.getConnection();
 
-    const [postRows] = await pool.query(
+  try {
+    // 1) Check post exists
+    const [postRows] = await conn.query(
       `SELECT id, authorEmail FROM FeedPosts WHERE id = ?`,
       [postId]
     );
-
     if (!postRows || postRows.length === 0) {
+      conn.release();
       return res.status(404).json({ success: false, message: "Post not found" });
     }
 
     const post = postRows[0];
     const isAuthor = post.authorEmail === userEmail;
 
-    // manager/am check
-    const [userRows] = await pool.query(
+    // 2) Manager/AM check
+    const [userRows] = await conn.query(
       `SELECT Access FROM users WHERE (Email = ? OR email = ?) AND (db_name = ? OR dbName = ?)`,
       [userEmail, userEmail, db, db]
     );
 
-    const access = (userRows?.[0]?.Access || '').toString().toLowerCase();
-    const isManager = ['manager', 'am'].includes(access);
+    const access = (userRows?.[0]?.Access || '').toString().trim().toLowerCase();
+    const isManager = ['manager', 'am', 'assistant manager'].includes(access);
 
     if (!isAuthor && !isManager) {
-      return res.status(403).json({
-        success: false,
-        message: "Not authorized to delete this post"
-      });
+      conn.release();
+      return res.status(403).json({ success: false, message: "Not authorized to delete this post" });
     }
 
-    const [result] = await pool.query(
-      `UPDATE FeedPosts SET isActive = false WHERE id = ?`,
+    await conn.beginTransaction();
+
+    // 3) Delete reactions (CommentReactions) for comments in this post
+    await conn.query(
+      `DELETE cr
+       FROM CommentReactions cr
+       JOIN FeedComments fc ON fc.id = cr.commentId
+       WHERE fc.postId = ?`,
       [postId]
     );
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, message: "Post not found" });
+    // 4) Delete comments (replies included)
+    await conn.query(
+      `DELETE FROM FeedComments WHERE postId = ?`,
+      [postId]
+    );
+
+    // 5) Delete likes
+    await conn.query(
+      `DELETE FROM FeedLikes WHERE postId = ?`,
+      [postId]
+    );
+
+    // 6) Delete mentions
+    await conn.query(
+      `DELETE FROM FeedPostMentions WHERE postId = ?`,
+      [postId]
+    );
+
+    // 7) Delete media
+    await conn.query(
+      `DELETE FROM FeedMedia WHERE postId = ?`,
+      [postId]
+    );
+
+    // 8) Delete poll data (votes -> options -> poll)
+    const [pollRows] = await conn.query(
+      `SELECT id FROM FeedPolls WHERE postId = ?`,
+      [postId]
+    );
+
+    if (pollRows && pollRows.length > 0) {
+      const pollId = pollRows[0].id;
+
+      await conn.query(`DELETE FROM FeedPollVotes WHERE pollId = ?`, [pollId]);
+      await conn.query(`DELETE FROM FeedPollOptions WHERE pollId = ?`, [pollId]);
+      await conn.query(`DELETE FROM FeedPolls WHERE id = ?`, [pollId]);
     }
+
+    // 9) Finally delete the post (HARD DELETE)
+    // If you prefer soft delete, replace this with UPDATE isActive=false
+    await conn.query(
+      `DELETE FROM FeedPosts WHERE id = ?`,
+      [postId]
+    );
+
+    await conn.commit();
+    conn.release();
 
     return res.json({ success: true, message: "Post deleted successfully" });
 
   } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    conn.release();
     console.error("❌ Error deleting post:", err);
     return res.status(500).json({
       success: false,
