@@ -1394,7 +1394,6 @@ app.post("/feed/pin", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    // Permission check
     const [userRows] = await pool.query(
       `SELECT Access FROM users
        WHERE (Email = ? OR email = ?)
@@ -1402,13 +1401,19 @@ app.post("/feed/pin", async (req, res) => {
       [userEmail, userEmail, db]
     );
 
-    const access = (userRows?.[0]?.Access || "").toString().trim().toLowerCase();
-    const isManager = ["admin", "AM"].includes(access);
+    const access = (userRows?.[0]?.Access || "")
+      .toString()
+      .trim()
+      .toLowerCase();
 
-    if (!isManager) {
+    // ✅ AM + Admin allowed
+    const canPin = ["am", "assistant manager", "admin"].includes(access);
+
+    if (!canPin) {
+      console.log("⛔ PIN denied:", { db, postId, userEmail, access });
       return res.status(403).json({
         success: false,
-        message: "Only managers and AMs can pin/unpin posts",
+        message: "Only Admin or AM can pin/unpin posts",
       });
     }
 
@@ -1655,7 +1660,7 @@ app.delete("/feed/post/:postId", async (req, res) => {
   try {
     // 1) Check post exists
     const [postRows] = await conn.query(
-      `SELECT id, authorEmail FROM FeedPosts WHERE id = ?`,
+      `SELECT id FROM FeedPosts WHERE id = ?`,
       [postId]
     );
 
@@ -1664,10 +1669,7 @@ app.delete("/feed/post/:postId", async (req, res) => {
       return res.status(404).json({ success: false, message: "Post not found" });
     }
 
-    const post = postRows[0];
-    const isAuthor = (post.authorEmail || "").toLowerCase() === userEmail.toLowerCase();
-
-    // 2) Manager/AM check (IMPORTANT: use conn, not pool)
+    // 2) AM check ONLY
     const [userRows] = await conn.query(
       `SELECT Access FROM users
        WHERE (Email = ? OR email = ?)
@@ -1675,20 +1677,24 @@ app.delete("/feed/post/:postId", async (req, res) => {
       [userEmail, userEmail, db]
     );
 
-    const access = (userRows?.[0]?.Access || "").toString().trim().toLowerCase();
-    const isManager = ["admin", "AM"].includes(access);
+    const access = (userRows?.[0]?.Access || "")
+      .toString()
+      .trim()
+      .toLowerCase();
 
-    if (!isAuthor && !isManager) {
+    const isAM = ["am", "assistant manager"].includes(access);
+
+    if (!isAM) {
       conn.release();
-      return res
-        .status(403)
-        .json({ success: false, message: "Not authorized to delete this post" });
+      return res.status(403).json({
+        success: false,
+        message: "Only AM can delete posts",
+      });
     }
 
     await conn.beginTransaction();
 
     // 3) Delete reactions for comments in this post
-    // NOTE: ensure your reactions table name is EXACT: CommentReactions
     await conn.query(
       `DELETE cr
        FROM CommentReactions cr
@@ -1697,7 +1703,7 @@ app.delete("/feed/post/:postId", async (req, res) => {
       [postId]
     );
 
-    // 4) Delete comments (replies included)
+    // 4) Delete comments (includes replies)
     await conn.query(`DELETE FROM FeedComments WHERE postId = ?`, [postId]);
 
     // 5) Delete likes
@@ -1709,7 +1715,7 @@ app.delete("/feed/post/:postId", async (req, res) => {
     // 7) Delete media
     await conn.query(`DELETE FROM FeedMedia WHERE postId = ?`, [postId]);
 
-    // 8) Delete poll data (votes -> options -> poll)
+    // 8) Delete poll data
     const [pollRows] = await conn.query(
       `SELECT id FROM FeedPolls WHERE postId = ?`,
       [postId]
@@ -1717,27 +1723,22 @@ app.delete("/feed/post/:postId", async (req, res) => {
 
     if (pollRows && pollRows.length > 0) {
       const pollId = pollRows[0].id;
-
       await conn.query(`DELETE FROM FeedPollVotes WHERE pollId = ?`, [pollId]);
       await conn.query(`DELETE FROM FeedPollOptions WHERE pollId = ?`, [pollId]);
       await conn.query(`DELETE FROM FeedPolls WHERE id = ?`, [pollId]);
     }
 
-    // 9) Delete the post (HARD DELETE)
+    // 9) Delete the post
     await conn.query(`DELETE FROM FeedPosts WHERE id = ?`, [postId]);
 
     await conn.commit();
     conn.release();
 
-    console.log(
-      `✅ Post deleted successfully | db=${db} | postId=${postId} | by=${userEmail} | access=${access || "author"}`
-    );
+    console.log(`✅ Post deleted successfully | db=${db} | postId=${postId} | by=${userEmail} | access=${access}`);
 
     return res.json({ success: true, message: "Post deleted successfully" });
   } catch (err) {
-    try {
-      await conn.rollback();
-    } catch (_) {}
+    try { await conn.rollback(); } catch (_) {}
     conn.release();
 
     console.error("❌ Error deleting post:", err);
