@@ -1403,7 +1403,7 @@ app.post("/feed/pin", async (req, res) => {
     );
 
     const access = (userRows?.[0]?.Access || "").toString().trim().toLowerCase();
-    const isManager = ["manager", "am", "assistant manager"].includes(access);
+    const isManager = ["admin", "AM"].includes(access);
 
     if (!isManager) {
       return res.status(403).json({
@@ -1676,7 +1676,7 @@ app.delete("/feed/post/:postId", async (req, res) => {
     );
 
     const access = (userRows?.[0]?.Access || "").toString().trim().toLowerCase();
-    const isManager = ["manager", "am", "assistant manager"].includes(access);
+    const isManager = ["admin", "AM"].includes(access);
 
     if (!isAuthor && !isManager) {
       conn.release();
