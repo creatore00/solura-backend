@@ -908,91 +908,20 @@ function _timeAgo(date) {
   return new Date(date).toLocaleDateString();
 }
 
-// Add comment to post
-app.post("/feed/comment", async (req, res) => {
-  const { db, postId, userEmail, content } = req.body;
+// Helper: safe boolean to tinyint
+function _toTinyInt(v) {
+  return v === true || v === 1 || v === '1' || v === 'true' ? 1 : 0;
+}
 
-  if (!db || !postId || !userEmail || !content) {
-    return res.status(400).json({
-      success: false,
-      message: "Database, postId, userEmail, and content are required"
-    });
+// Helper: group reactions (frontend expects {counts:{}, total:int})
+function _groupReactions(reactions) {
+  const grouped = {};
+  for (nconst of reactions) {
+    if (!grouped[nconst.emoji]) grouped[nconst.emoji] = 0;
+    grouped[nconst.emoji]++;
   }
-
-  try {
-    const pool = getPool(db);
-    const commentId = generateUniqueCode();
-
-    // Get user info
-    const [userRows] = await pool.query(
-      "SELECT name, lastName, designation FROM Employees WHERE email = ?",
-      [userEmail]
-    );
-
-    if (!userRows || userRows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found"
-      });
-    }
-
-    const user = userRows[0];
-    const userName = `${user.name} ${user.lastName}`;
-
-    // Insert comment
-    await pool.query(
-      `INSERT INTO FeedComments (id, postId, userEmail, userName, userDesignation, content, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-      [commentId, postId, userEmail, userName, user.designation || '', content]
-    );
-
-    // Get post author for notification
-    const [postRows] = await pool.query(
-      "SELECT authorName, authorEmail FROM FeedPosts WHERE id = ?",
-      [postId]
-    );
-
-    if (postRows.length > 0 && postRows[0].authorEmail !== userEmail) {
-      const post = postRows[0];
-      
-      // Create notification for post author
-      await pool.query(
-        `INSERT INTO Notifications (targetRole, title, message, type, postId)
-         VALUES (?, ?, ?, ?, ?)`,
-        ['ALL', 'New Comment', `${userName} commented on your post: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`, 'FEED', postId]
-      );
-    }
-
-    // Get updated comment count
-    const [countResult] = await pool.query(
-      "SELECT COUNT(*) as count FROM FeedComments WHERE postId = ?",
-      [postId]
-    );
-
-    return res.json({
-      success: true,
-      message: "Comment added successfully",
-      comment: {
-        id: commentId,
-        postId,
-        userEmail,
-        userName,
-        userDesignation: user.designation,
-        content,
-        createdAt: new Date()
-      },
-      comments: countResult[0].count
-    });
-
-  } catch (err) {
-    console.error("Error adding comment:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Server error adding comment",
-      error: err.message
-    });
-  }
-});
+  return { counts: grouped, total: reactions.length };
+}
 
 // Get media by ID
 app.get("/feed/media", async (req, res) => {
@@ -1031,55 +960,6 @@ app.get("/feed/media", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Server error fetching media",
-      error: err.message
-    });
-  }
-});
-
-// Get comments for a post
-app.get("/feed/comments", async (req, res) => {
-  const { db, postId } = req.query;
-
-  if (!db || !postId) {
-    return res.status(400).json({
-      success: false,
-      message: "Database and postId are required"
-    });
-  }
-
-  try {
-    const pool = getPool(db);
-
-    const [comments] = await pool.query(
-      `SELECT c.id, c.userEmail, c.userName, c.userDesignation, c.content, c.createdAt,
-              e.name, e.lastName, e.designation
-       FROM FeedComments c
-       LEFT JOIN Employees e ON c.userEmail = e.email
-       WHERE c.postId = ?
-       ORDER BY c.createdAt DESC`,
-      [postId]
-    );
-
-    // Ensure we have proper names
-    const formattedComments = comments.map(comment => ({
-      id: comment.id,
-      userEmail: comment.userEmail,
-      userName: comment.userName || (comment.name && comment.lastName ? `${comment.name} ${comment.lastName}` : comment.userEmail),
-      userDesignation: comment.userDesignation || comment.designation || '',
-      content: comment.content,
-      createdAt: comment.createdAt
-    }));
-
-    return res.json({
-      success: true,
-      comments: formattedComments
-    });
-
-  } catch (err) {
-    console.error("❌ Error fetching comments:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Server error fetching comments",
       error: err.message
     });
   }
@@ -1155,7 +1035,7 @@ app.delete("/feed/comment/:commentId", async (req, res) => {
   }
 });
 
-// ADD COMMENT WITH PARENT (REPLY)
+// ADD COMMENT (supports parentCommentId = reply) + optional mention notifications
 app.post("/feed/comment", async (req, res) => {
   const { db, postId, userEmail, content, parentCommentId } = req.body;
 
@@ -1170,106 +1050,120 @@ app.post("/feed/comment", async (req, res) => {
     const pool = getPool(db);
     const commentId = generateUniqueCode();
 
+    // Ensure post exists
+    const [postRows] = await pool.query(
+      `SELECT id, authorEmail, authorName FROM FeedPosts WHERE id = ? AND isActive = true`,
+      [postId]
+    );
+
+    if (!postRows || postRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Post not found" });
+    }
+
     // Get user info
     const [userRows] = await pool.query(
-      "SELECT name, lastName, designation FROM Employees WHERE email = ?",
+      `SELECT name, lastName, designation FROM Employees WHERE email = ?`,
       [userEmail]
     );
 
     if (!userRows || userRows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found"
-      });
+      return res.status(404).json({ success: false, message: "User not found" });
     }
 
     const user = userRows[0];
     const userName = `${user.name} ${user.lastName}`;
 
-    // Insert comment with optional parentCommentId
+    // If replying, ensure parent exists and belongs to same post
+    let parentId = parentCommentId || null;
+    if (parentId) {
+      const [parentRows] = await pool.query(
+        `SELECT id, postId, userEmail, userName FROM FeedComments WHERE id = ?`,
+        [parentId]
+      );
+      if (!parentRows || parentRows.length === 0) {
+        parentId = null; // silently fallback (or you can 400)
+      } else if (parentRows[0].postId !== postId) {
+        return res.status(400).json({ success: false, message: "Invalid parent comment" });
+      }
+    }
+
+    // Insert comment (parentCommentId supported)
     await pool.query(
-      `INSERT INTO FeedComments (id, postId, parentCommentId, userEmail, userName, userDesignation, content, createdAt)
+      `INSERT INTO FeedComments
+       (id, postId, parentCommentId, userEmail, userName, userDesignation, content, createdAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
-        commentId, 
-        postId, 
-        parentCommentId || null, 
-        userEmail, 
-        userName, 
-        user.designation || '', 
+        commentId,
+        postId,
+        parentId,
+        userEmail,
+        userName,
+        user.designation || '',
         content
       ]
     );
 
-    // Get post author for notification
-    const [postRows] = await pool.query(
-      "SELECT authorName, authorEmail FROM FeedPosts WHERE id = ?",
-      [postId]
-    );
-
-    if (postRows.length > 0) {
+    // Update comments count is derived in query, but frontend reads count from posts endpoint.
+    // Optional: notify post author or parent comment author
+    try {
       const post = postRows[0];
-      
-      // Determine notification recipient
-      let notifyEmail = post.authorEmail;
-      let notifyMessage = `${userName} commented on your post`;
-      
-      if (parentCommentId) {
-        // Get parent comment author
+
+      let targetEmail = post.authorEmail;
+      let title = "💬 New Comment";
+      let msg = `${userName} commented on your post: "${content.substring(0, 60)}${content.length > 60 ? '...' : ''}"`;
+      let type = "COMMENT";
+
+      if (parentId) {
         const [parentRows] = await pool.query(
           `SELECT userEmail, userName FROM FeedComments WHERE id = ?`,
-          [parentCommentId]
+          [parentId]
         );
-        
-        if (parentRows.length > 0 && parentRows[0].userEmail !== userEmail) {
-          notifyEmail = parentRows[0].userEmail;
-          notifyMessage = `${userName} replied to your comment`;
+        if (parentRows.length > 0) {
+          targetEmail = parentRows[0].userEmail;
+          title = "💬 New Reply";
+          msg = `${userName} replied to your comment: "${content.substring(0, 60)}${content.length > 60 ? '...' : ''}"`;
+          type = "REPLY";
         }
       }
 
-      // Create notification
-      if (notifyEmail !== userEmail) {
+      if (targetEmail && targetEmail !== userEmail) {
         await pool.query(
-          `INSERT INTO Notifications 
+          `INSERT INTO Notifications
            (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             'USER',
-            notifyEmail,
+            targetEmail,
             userEmail,
-            parentCommentId ? '💬 New Reply' : '💬 New Comment',
-            `${notifyMessage}: "${content.substring(0, 50)}${content.length > 50 ? '...' : ''}"`,
-            'COMMENT',
+            title,
+            msg,
+            type,
             postId,
             false,
             new Date()
           ]
         );
       }
+    } catch (notifErr) {
+      console.error("⚠️ Notification error (ignored):", notifErr.message);
     }
 
-    // Get updated comment count
-    const [countResult] = await pool.query(
-      "SELECT COUNT(*) as count FROM FeedComments WHERE postId = ?",
-      [postId]
-    );
-
+    // Return created comment in the shape your UI expects
     return res.json({
       success: true,
       message: "Comment added successfully",
       comment: {
         id: commentId,
         postId,
-        parentCommentId: parentCommentId || null,
+        parentCommentId: parentId,
         userEmail,
         userName,
-        userDesignation: user.designation,
+        userDesignation: user.designation || '',
         content,
         createdAt: new Date(),
-        reactions: [],
+        reactions: { counts: {}, total: 0 },
         replies: []
-      },
-      comments: countResult[0].count
+      }
     });
 
   } catch (err) {
@@ -1282,7 +1176,7 @@ app.post("/feed/comment", async (req, res) => {
   }
 });
 
-// GET COMMENTS WITH REPLIES AND REACTIONS
+// GET COMMENTS WITH REPLIES + REACTIONS (single correct version)
 app.get("/feed/comments", async (req, res) => {
   const { db, postId } = req.query;
 
@@ -1296,9 +1190,9 @@ app.get("/feed/comments", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    // Get all comments for the post
+    // Fetch comments in ASC so replies naturally come after parent
     const [comments] = await pool.query(
-      `SELECT c.*, 
+      `SELECT c.*,
               e.name, e.lastName, e.designation
        FROM FeedComments c
        LEFT JOIN Employees e ON c.userEmail = e.email
@@ -1307,74 +1201,60 @@ app.get("/feed/comments", async (req, res) => {
       [postId]
     );
 
-    // Get all reactions for these comments
-    const commentIds = comments.map(c => c.id);
+    const ids = comments.map(c => c.id);
     let reactions = [];
-    
-    if (commentIds.length > 0) {
+
+    if (ids.length > 0) {
       const [reactionRows] = await pool.query(
-        `SELECT * FROM CommentReactions 
-         WHERE commentId IN (?) 
-         ORDER BY createdAt ASC`,
-        [commentIds]
+        `SELECT * FROM CommentReactions WHERE commentId IN (?) ORDER BY createdAt ASC`,
+        [ids]
       );
       reactions = reactionRows;
     }
 
-    // Group reactions by comment
     const reactionsByComment = {};
-    for (const reaction of reactions) {
-      if (!reactionsByComment[reaction.commentId]) {
-        reactionsByComment[reaction.commentId] = [];
-      }
-      reactionsByComment[reaction.commentId].push(reaction);
+    for (const r of reactions) {
+      if (!reactionsByComment[r.commentId]) reactionsByComment[r.commentId] = [];
+      reactionsByComment[r.commentId].push(r);
     }
 
-    // Format comments and group by parent
-    const commentsMap = {};
-    const topComments = [];
+    // Map all comments
+    const byId = {};
+    const roots = [];
 
-    for (const comment of comments) {
-      const formattedComment = {
-        id: comment.id,
-        postId: comment.postId,
-        parentCommentId: comment.parentCommentId,
-        userEmail: comment.userEmail,
-        userName: comment.userName || (comment.name && comment.lastName ? `${comment.name} ${comment.lastName}` : comment.userEmail),
-        userDesignation: comment.userDesignation || comment.designation || '',
-        content: comment.content,
-        createdAt: comment.createdAt,
-        reactions: _groupReactions(reactionsByComment[comment.id] || []),
+    for (const c of comments) {
+      const formatted = {
+        id: c.id,
+        postId: c.postId,
+        parentCommentId: c.parentCommentId,
+        userEmail: c.userEmail,
+        userName: c.userName || (c.name && c.lastName ? `${c.name} ${c.lastName}` : c.userEmail),
+        userDesignation: c.userDesignation || c.designation || '',
+        content: c.content,
+        createdAt: c.createdAt,
+        reactions: _groupReactions(reactionsByComment[c.id] || []),
         replies: []
       };
-      
-      commentsMap[comment.id] = formattedComment;
-      
-      if (!comment.parentCommentId) {
-        topComments.push(formattedComment);
-      }
+      byId[c.id] = formatted;
     }
 
-    // Attach replies to parent comments
-    for (const comment of comments) {
-      if (comment.parentCommentId && commentsMap[comment.parentCommentId]) {
-        commentsMap[comment.parentCommentId].replies.push(
-          commentsMap[comment.id]
-        );
+    // Build tree
+    for (const id in byId) {
+      const c = byId[id];
+      const parentId = c.parentCommentId;
+      if (!parentId || !byId[parentId]) {
+        roots.push(c);
+      } else {
+        byId[parentId].replies.push(c);
       }
     }
 
     // Sort replies by date
-    for (const comment of topComments) {
-      comment.replies.sort((a, b) => 
-        new Date(a.createdAt) - new Date(b.createdAt)
-      );
+    for (const c of roots) {
+      c.replies.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     }
 
-    return res.json({
-      success: true,
-      comments: topComments
-    });
+    return res.json({ success: true, comments: roots });
 
   } catch (err) {
     console.error("❌ Error fetching comments:", err);
@@ -1385,24 +1265,6 @@ app.get("/feed/comments", async (req, res) => {
     });
   }
 });
-
-// Helper function to group reactions
-function _groupReactions(reactions) {
-  const grouped = {};
-  let userReaction = null;
-  
-  for (const reaction of reactions) {
-    if (!grouped[reaction.emoji]) {
-      grouped[reaction.emoji] = 0;
-    }
-    grouped[reaction.emoji]++;
-  }
-  
-  return {
-    counts: grouped,
-    total: reactions.length
-  };
-}
 
 // TOGGLE REACTION ON COMMENT
 app.post("/feed/comment/reaction", async (req, res) => {
@@ -1418,80 +1280,36 @@ app.post("/feed/comment/reaction", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    // Check if reaction already exists
-    const [existingReaction] = await pool.query(
-      `SELECT * FROM CommentReactions 
-       WHERE commentId = ? AND userEmail = ? AND emoji = ?`,
+    // Ensure comment exists
+    const [commentRows] = await pool.query(
+      `SELECT id, postId, userEmail FROM FeedComments WHERE id = ?`,
+      [commentId]
+    );
+    if (!commentRows || commentRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Comment not found" });
+    }
+
+    const [existing] = await pool.query(
+      `SELECT id FROM CommentReactions WHERE commentId = ? AND userEmail = ? AND emoji = ?`,
       [commentId, userEmail, emoji]
     );
 
-    if (existingReaction.length > 0) {
-      // Remove reaction
+    if (existing.length > 0) {
       await pool.query(
-        `DELETE FROM CommentReactions 
-         WHERE commentId = ? AND userEmail = ? AND emoji = ?`,
+        `DELETE FROM CommentReactions WHERE commentId = ? AND userEmail = ? AND emoji = ?`,
         [commentId, userEmail, emoji]
       );
-      
-      return res.json({
-        success: true,
-        message: "Reaction removed",
-        action: 'removed'
-      });
-    } else {
-      // Add reaction
-      const reactionId = generatePostId();
-      await pool.query(
-        `INSERT INTO CommentReactions (id, commentId, userEmail, emoji, createdAt)
-         VALUES (?, ?, ?, ?, NOW())`,
-        [reactionId, commentId, userEmail, emoji]
-      );
-
-      // Get comment author for notification
-      const [commentRows] = await pool.query(
-        `SELECT c.userEmail, c.userName, p.authorEmail, p.id as postId
-         FROM FeedComments c
-         JOIN FeedPosts p ON c.postId = p.id
-         WHERE c.id = ?`,
-        [commentId]
-      );
-
-      if (commentRows.length > 0 && commentRows[0].userEmail !== userEmail) {
-        // Get user's name for notification
-        const [userRows] = await pool.query(
-          `SELECT name, lastName FROM Employees WHERE email = ?`,
-          [userEmail]
-        );
-
-        const userName = userRows.length > 0 
-          ? `${userRows[0].name} ${userRows[0].lastName}`
-          : userEmail;
-
-        // Notify comment author
-        await pool.query(
-          `INSERT INTO Notifications 
-           (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            'USER',
-            commentRows[0].userEmail,
-            userEmail,
-            '😊 New Reaction',
-            `${userName} reacted with ${emoji} to your comment`,
-            'REACTION',
-            commentRows[0].postId,
-            false,
-            new Date()
-          ]
-        );
-      }
-
-      return res.json({
-        success: true,
-        message: "Reaction added",
-        action: 'added'
-      });
+      return res.json({ success: true, action: "removed" });
     }
+
+    const reactionId = generatePostId();
+    await pool.query(
+      `INSERT INTO CommentReactions (id, commentId, userEmail, emoji, createdAt)
+       VALUES (?, ?, ?, ?, NOW())`,
+      [reactionId, commentId, userEmail, emoji]
+    );
+
+    return res.json({ success: true, action: "added" });
 
   } catch (err) {
     console.error("❌ Error toggling reaction:", err);
@@ -1575,15 +1393,15 @@ app.post("/feed/pin", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    // Check if user has permission (Manager or AM)
+    // Permission check
+    // NOTE: adjust columns if your table uses different casing.
     const [userRows] = await pool.query(
-      `SELECT Access FROM users WHERE Email = ? AND db_name = ?`,
-      [userEmail, db]
+      `SELECT Access FROM users WHERE (Email = ? OR email = ?) AND (db_name = ? OR dbName = ?)`,
+      [userEmail, userEmail, db, db]
     );
 
-    const isManager = userRows.some(row => 
-      row.Access && ['manager', 'am'].includes(row.Access.toLowerCase())
-    );
+    const access = (userRows?.[0]?.Access || '').toString().toLowerCase();
+    const isManager = ['manager', 'am'].includes(access);
 
     if (!isManager) {
       return res.status(403).json({
@@ -1592,19 +1410,26 @@ app.post("/feed/pin", async (req, res) => {
       });
     }
 
-    await pool.query(
-      "UPDATE FeedPosts SET isPinned = ? WHERE id = ?",
-      [pin === true || pin === 'true', postId]
+    const pinVal = _toTinyInt(pin);
+
+    const [result] = await pool.query(
+      `UPDATE FeedPosts SET isPinned = ? WHERE id = ? AND isActive = true`,
+      [pinVal, postId]
     );
+
+    // If nothing updated, post might not exist
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: "Post not found" });
+    }
 
     return res.json({
       success: true,
-      message: pin ? "Post pinned successfully" : "Post unpinned successfully",
-      isPinned: pin === true || pin === 'true'
+      message: pinVal === 1 ? "Post pinned successfully" : "Post unpinned successfully",
+      isPinned: pinVal === 1
     });
 
   } catch (err) {
-    console.error("Error pinning/unpinning post:", err);
+    console.error("❌ Error pinning/unpinning post:", err);
     return res.status(500).json({
       success: false,
       message: "Server error updating post",
@@ -1627,41 +1452,36 @@ app.post("/feed/poll/vote", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    // Check if user already voted
-    const [existingVote] = await pool.query(
-      `SELECT * FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
-      [pollId, userEmail]
-    );
-
-    if (existingVote.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: "You have already voted in this poll"
-      });
-    }
-
-    // Get poll to check if it's still active
-    const [poll] = await pool.query(
-      `SELECT * FROM FeedPolls WHERE id = ?`,
+    // Poll exists & active
+    const [pollRows] = await pool.query(
+      `SELECT id, endsAt FROM FeedPolls WHERE id = ?`,
       [pollId]
     );
-
-    if (poll.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Poll not found"
-      });
+    if (!pollRows || pollRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Poll not found" });
+    }
+    if (pollRows[0].endsAt && new Date(pollRows[0].endsAt) < new Date()) {
+      return res.status(400).json({ success: false, message: "This poll has ended" });
     }
 
-    // Check if poll has expired
-    if (poll[0].endsAt && new Date(poll[0].endsAt) < new Date()) {
-      return res.status(400).json({
-        success: false,
-        message: "This poll has ended"
-      });
+    // Validate option belongs to poll
+    const [optRows] = await pool.query(
+      `SELECT id FROM FeedPollOptions WHERE id = ? AND pollId = ?`,
+      [optionId, pollId]
+    );
+    if (!optRows || optRows.length === 0) {
+      return res.status(400).json({ success: false, message: "Invalid option for this poll" });
     }
 
-    // Insert vote
+    // Already voted?
+    const [existingVote] = await pool.query(
+      `SELECT id FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
+      [pollId, userEmail]
+    );
+    if (existingVote.length > 0) {
+      return res.status(400).json({ success: false, message: "You have already voted in this poll" });
+    }
+
     const voteId = generatePostId();
     await pool.query(
       `INSERT INTO FeedPollVotes (id, pollId, optionId, userEmail, createdAt)
@@ -1669,64 +1489,12 @@ app.post("/feed/poll/vote", async (req, res) => {
       [voteId, pollId, optionId, userEmail]
     );
 
-    // Increment vote count on the option
     await pool.query(
       `UPDATE FeedPollOptions SET votes = votes + 1 WHERE id = ?`,
       [optionId]
     );
 
-    // ========== AGGIUNGI NOTIFICHE ==========
-    // Get user info for notification
-    const [userRows] = await pool.query(
-      `SELECT name, lastName FROM Employees WHERE email = ?`,
-      [userEmail]
-    );
-
-    const userName = userRows.length > 0 
-      ? `${userRows[0].name} ${userRows[0].lastName}`
-      : userEmail;
-
-    // Get post author and post info
-    const [postRows] = await pool.query(
-      `SELECT p.authorEmail, p.id as postId, p.authorName
-       FROM FeedPosts p
-       JOIN FeedPolls pol ON p.id = pol.postId
-       WHERE pol.id = ?`,
-      [pollId]
-    );
-
-    if (postRows.length > 0 && postRows[0].authorEmail !== userEmail) {
-      // Get option text
-      const [optionRows] = await pool.query(
-        `SELECT optionText FROM FeedPollOptions WHERE id = ?`,
-        [optionId]
-      );
-      
-      const optionText = optionRows.length > 0 ? optionRows[0].optionText : 'a option';
-
-      // Notify post author
-      await pool.query(
-        `INSERT INTO Notifications 
-         (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          'USER',
-          postRows[0].authorEmail,
-          userEmail,
-          '🗳️ New vote in your poll',
-          `${userName} voted for "${optionText}" in your poll`,
-          'POLL',
-          postRows[0].postId,
-          false,
-          new Date()
-        ]
-      );
-    }
-
-    return res.json({
-      success: true,
-      message: "Vote recorded successfully"
-    });
+    return res.json({ success: true, message: "Vote recorded successfully" });
 
   } catch (err) {
     console.error("❌ Error voting in poll:", err);
@@ -1802,127 +1570,58 @@ app.post("/feed/poll/change-vote", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    // Check if poll exists
-    const [poll] = await pool.query(
-      `SELECT * FROM FeedPolls WHERE id = ?`,
+    const [pollRows] = await pool.query(
+      `SELECT id, endsAt FROM FeedPolls WHERE id = ?`,
       [pollId]
     );
-
-    if (poll.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Poll not found"
-      });
+    if (!pollRows || pollRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Poll not found" });
+    }
+    if (pollRows[0].endsAt && new Date(pollRows[0].endsAt) < new Date()) {
+      return res.status(400).json({ success: false, message: "This poll has ended" });
     }
 
-    // Check if poll has expired
-    if (poll[0].endsAt && new Date(poll[0].endsAt) < new Date()) {
-      return res.status(400).json({
-        success: false,
-        message: "This poll has ended"
-      });
+    // Validate new option belongs to poll
+    const [optRows] = await pool.query(
+      `SELECT id FROM FeedPollOptions WHERE id = ? AND pollId = ?`,
+      [newOptionId, pollId]
+    );
+    if (!optRows || optRows.length === 0) {
+      return res.status(400).json({ success: false, message: "Invalid option for this poll" });
     }
 
-    // If oldOptionId is provided, remove the previous vote
-    if (oldOptionId) {
-      // Delete the old vote
-      await pool.query(
-        `DELETE FROM FeedPollVotes WHERE pollId = ? AND userEmail = ? AND optionId = ?`,
-        [pollId, userEmail, oldOptionId]
-      );
+    // Find existing vote (source of truth)
+    const [existingVotes] = await pool.query(
+      `SELECT optionId FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
+      [pollId, userEmail]
+    );
 
-      // Decrement vote count on the old option
+    const existingOptionId = existingVotes.length > 0 ? existingVotes[0].optionId : null;
+    const removeOptionId = oldOptionId || existingOptionId;
+
+    if (removeOptionId) {
       await pool.query(
-        `UPDATE FeedPollOptions SET votes = votes - 1 WHERE id = ? AND votes > 0`,
-        [oldOptionId]
-      );
-    } else {
-      // If no oldOptionId, check if user already voted
-      const [existingVote] = await pool.query(
-        `SELECT * FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
+        `DELETE FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
         [pollId, userEmail]
       );
-
-      if (existingVote.length > 0) {
-        // User already voted, remove that vote first
-        const oldVote = existingVote[0];
-        await pool.query(
-          `DELETE FROM FeedPollVotes WHERE pollId = ? AND userEmail = ?`,
-          [pollId, userEmail]
-        );
-        
-        await pool.query(
-          `UPDATE FeedPollOptions SET votes = votes - 1 WHERE id = ? AND votes > 0`,
-          [oldVote.optionId]
-        );
-      }
+      await pool.query(
+        `UPDATE FeedPollOptions SET votes = GREATEST(votes - 1, 0) WHERE id = ?`,
+        [removeOptionId]
+      );
     }
 
-    // Insert new vote
     const voteId = generatePostId();
     await pool.query(
       `INSERT INTO FeedPollVotes (id, pollId, optionId, userEmail, createdAt)
        VALUES (?, ?, ?, ?, NOW())`,
       [voteId, pollId, newOptionId, userEmail]
     );
-
-    // Increment vote count on the new option
     await pool.query(
       `UPDATE FeedPollOptions SET votes = votes + 1 WHERE id = ?`,
       [newOptionId]
     );
 
-    // Get user info for notification
-    const [userRows] = await pool.query(
-      `SELECT name, lastName FROM Employees WHERE email = ?`,
-      [userEmail]
-    );
-
-    const userName = userRows.length > 0 
-      ? `${userRows[0].name} ${userRows[0].lastName}`
-      : userEmail;
-
-    // Get post author and post info
-    const [postRows] = await pool.query(
-      `SELECT p.authorEmail, p.id as postId, p.authorName
-       FROM FeedPosts p
-       JOIN FeedPolls pol ON p.id = pol.postId
-       WHERE pol.id = ?`,
-      [pollId]
-    );
-
-    if (postRows.length > 0 && postRows[0].authorEmail !== userEmail) {
-      // Get option text
-      const [optionRows] = await pool.query(
-        `SELECT optionText FROM FeedPollOptions WHERE id = ?`,
-        [newOptionId]
-      );
-      
-      const optionText = optionRows.length > 0 ? optionRows[0].optionText : 'a option';
-
-      // Notify post author
-      await pool.query(
-        `INSERT INTO Notifications 
-         (targetRole, targetEmail, authorEmail, title, message, type, postId, isRead, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          'USER',
-          postRows[0].authorEmail,
-          userEmail,
-          '🔄 Vote changed in your poll',
-          `${userName} changed their vote to "${optionText}"`,
-          'POLL',
-          postRows[0].postId,
-          false,
-          new Date()
-        ]
-      );
-    }
-
-    return res.json({
-      success: true,
-      message: oldOptionId ? "Vote changed successfully" : "Vote recorded successfully"
-    });
+    return res.json({ success: true, message: "Vote changed successfully" });
 
   } catch (err) {
     console.error("❌ Error changing vote in poll:", err);
@@ -1949,31 +1648,26 @@ app.delete("/feed/post/:postId", async (req, res) => {
   try {
     const pool = getPool(db);
 
-    // Get post info
     const [postRows] = await pool.query(
-      "SELECT * FROM FeedPosts WHERE id = ?",
+      `SELECT id, authorEmail FROM FeedPosts WHERE id = ?`,
       [postId]
     );
 
-    if (postRows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Post not found"
-      });
+    if (!postRows || postRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Post not found" });
     }
 
     const post = postRows[0];
-
-    // Check if user has permission (author, Manager, or AM)
-    const [userRows] = await pool.query(
-      `SELECT Access FROM users WHERE Email = ? AND db_name = ?`,
-      [userEmail, db]
-    );
-
-    const isManager = userRows.some(row => 
-      row.Access && ['manager', 'am'].includes(row.Access.toLowerCase())
-    );
     const isAuthor = post.authorEmail === userEmail;
+
+    // manager/am check
+    const [userRows] = await pool.query(
+      `SELECT Access FROM users WHERE (Email = ? OR email = ?) AND (db_name = ? OR dbName = ?)`,
+      [userEmail, userEmail, db, db]
+    );
+
+    const access = (userRows?.[0]?.Access || '').toString().toLowerCase();
+    const isManager = ['manager', 'am'].includes(access);
 
     if (!isAuthor && !isManager) {
       return res.status(403).json({
@@ -1982,19 +1676,19 @@ app.delete("/feed/post/:postId", async (req, res) => {
       });
     }
 
-    // Soft delete - mark as inactive
-    await pool.query(
-      "UPDATE FeedPosts SET isActive = false WHERE id = ?",
+    const [result] = await pool.query(
+      `UPDATE FeedPosts SET isActive = false WHERE id = ?`,
       [postId]
     );
 
-    return res.json({
-      success: true,
-      message: "Post deleted successfully"
-    });
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: "Post not found" });
+    }
+
+    return res.json({ success: true, message: "Post deleted successfully" });
 
   } catch (err) {
-    console.error("Error deleting post:", err);
+    console.error("❌ Error deleting post:", err);
     return res.status(500).json({
       success: false,
       message: "Server error deleting post",
