@@ -417,6 +417,78 @@ app.post("/rota/shift-request/:id/accept", async (req, res) => {
   }
 });
 
+// GET /rota/my-day?db=WORKSPACE&email=user@email.com&date=YYYY-MM-DD
+app.get("/rota/my-day", async (req, res) => {
+  const { db, email, date } = req.query;
+
+  if (!db || !email || !date) {
+    return res.status(400).json({
+      success: false,
+      message: "db, email, date are required",
+    });
+  }
+
+  const workspacePool = getPool(db);
+  const conn = await workspacePool.getConnection();
+
+  try {
+    // 1) get employee name/lastName/designation from Employees table in workspace DB
+    const userEmail = String(email).trim().toLowerCase();
+
+    const [empRows] = await conn.query(
+      `SELECT name, lastName, designation
+       FROM Employees
+       WHERE LOWER(TRIM(email)) = ?
+       LIMIT 1`,
+      [userEmail]
+    );
+
+    if (!empRows || empRows.length === 0) {
+      conn.release();
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
+    }
+
+    const emp = empRows[0];
+
+    // 2) convert YYYY-MM-DD -> dd/MM/yyyy
+    const [yyyy, mm, dd] = String(date).split("-");
+    const dayPrefix = `${dd}/${mm}/${yyyy}`; // dd/MM/yyyy
+
+    // 3) fetch rota entries for that day for that employee
+    const [rotaRows] = await conn.query(
+      `SELECT id, day, startTime, endTime, designation
+       FROM rota
+       WHERE TRIM(name) = TRIM(?)
+         AND TRIM(lastName) = TRIM(?)
+         AND day LIKE CONCAT(?, '%')`,
+      [emp.name, emp.lastName, dayPrefix]
+    );
+
+    conn.release();
+
+    return res.json({
+      success: true,
+      shifts: rotaRows || [],
+      employee: {
+        name: emp.name,
+        lastName: emp.lastName,
+        designation: emp.designation,
+      },
+    });
+  } catch (err) {
+    conn.release();
+    console.error("❌ /rota/my-day error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: err.message,
+    });
+  }
+});
+
 // ==================== FEED ENDPOINTS ====================
 
 // Create a new feed post
