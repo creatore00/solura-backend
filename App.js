@@ -1382,6 +1382,8 @@ app.get("/feed/comment/reactions", async (req, res) => {
 
 // Pin/unpin post (Manager/AM only)
 app.post("/feed/pin", async (req, res) => {
+  console.log("🔥 HIT /feed/pin ROUTE v2", req.body);
+
   const { db, postId, userEmail, pin } = req.body;
 
   if (!db || !postId || !userEmail) {
@@ -1394,33 +1396,35 @@ app.post("/feed/pin", async (req, res) => {
   try {
     const pool = getPool(db);
 
+    // ✅ normalize Access in SQL so AM / am both work
     const [userRows] = await pool.query(
-      `SELECT Access FROM users
+      `SELECT LOWER(Access) AS access
+       FROM users
        WHERE (Email = ? OR email = ?)
          AND db_name = ?`,
       [userEmail, userEmail, db]
     );
 
-    const access = (userRows?.[0]?.Access || "")
-      .toString()
-      .trim()
-      .toLowerCase();
+    const access = (userRows?.[0]?.access || "").toString().trim(); // already lowercase
+    console.log("✅ PIN access lookup:", { userEmail, db, access });
 
-    // ✅ AM + Admin allowed
-    const canPin = ["am", "assistant manager", "admin"].includes(access);
+    // ✅ ONLY AM + admin can pin
+    const canPin = ["am", "admin"].includes(access);
 
     if (!canPin) {
-      console.log("⛔ PIN denied:", { db, postId, userEmail, access });
+      console.log("⛔ PIN denied:", { userEmail, db, access });
       return res.status(403).json({
         success: false,
-        message: "Only Admin or AM can pin/unpin posts",
+        message: `Not allowed to pin. Access='${access}'`,
       });
     }
 
-    const pinVal = _toTinyInt(pin);
+    const pinVal = pin ? 1 : 0;
 
     const [result] = await pool.query(
-      `UPDATE FeedPosts SET isPinned = ? WHERE id = ? AND isActive = true`,
+      `UPDATE FeedPosts
+       SET isPinned = ?
+       WHERE id = ? AND isActive = true`,
       [pinVal, postId]
     );
 
@@ -1671,17 +1675,22 @@ app.delete("/feed/post/:postId", async (req, res) => {
 
     // 2) AM check ONLY
     const [userRows] = await conn.query(
-      `SELECT Access FROM users
+      `SELECT LOWER(Access) AS access
+       FROM users
        WHERE (Email = ? OR email = ?)
          AND db_name = ?`,
       [userEmail, userEmail, db]
     );
 
-    const access = (userRows?.[0]?.Access || "")
-      .toString()
-      .trim()
-      .toLowerCase();
+    if (!userRows || userRows.length === 0) {
+      conn.release();
+      return res.status(403).json({
+        success: false,
+        message: "User not found for this workspace",
+      });
+    }
 
+    const access = (userRows[0].access || "").toString().trim(); // already lowercase
     const isAM = ["am", "assistant manager"].includes(access);
 
     if (!isAM) {
@@ -1734,7 +1743,9 @@ app.delete("/feed/post/:postId", async (req, res) => {
     await conn.commit();
     conn.release();
 
-    console.log(`✅ Post deleted successfully | db=${db} | postId=${postId} | by=${userEmail} | access=${access}`);
+    console.log(
+      `✅ Post deleted successfully | db=${db} | postId=${postId} | by=${userEmail} | access=${access}`
+    );
 
     return res.json({ success: true, message: "Post deleted successfully" });
   } catch (err) {
