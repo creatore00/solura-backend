@@ -2962,7 +2962,9 @@ app.get("/holidays", async (req, res) => {
   const { db, email } = req.query;
 
   if (!db || !email) {
-    return res.status(400).json({ success: false, message: "Database and email are required" });
+    return res
+      .status(400)
+      .json({ success: false, message: "Database and email are required" });
   }
 
   try {
@@ -2975,31 +2977,58 @@ app.get("/holidays", async (req, res) => {
     );
 
     if (!employeeRows.length) {
-      return res.status(404).json({ success: false, message: "Employee not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Employee not found" });
     }
 
     const { name, lastName } = employeeRows[0];
     const allowanceDays = Number(employeeRows[0].startHoliday ?? 0) || 0;
 
-    // 2) Get ALL holiday years
-    const [yearRows] = await pool.query(`
+    // 2) Get ALL holiday years (DATE columns -> returned as yyyy-mm-dd or Date depending on mysql config)
+    const [yearRowsRaw] = await pool.query(`
       SELECT HolidayYearStart AS start, HolidayYearEnd AS end
       FROM HolidayYearSettings
       ORDER BY HolidayYearStart DESC
     `);
 
-    // Helper: date parse expression from your stored strings dd/mm/yyyy (...)
+    const toYYYYMMDD = (v) => {
+      if (!v) return "";
+      // if mysql driver returns Date
+      if (v instanceof Date) {
+        const yyyy = v.getFullYear().toString().padStart(4, "0");
+        const mm = (v.getMonth() + 1).toString().padStart(2, "0");
+        const dd = v.getDate().toString().padStart(2, "0");
+        return `${yyyy}-${mm}-${dd}`;
+      }
+      // if returns string yyyy-mm-dd
+      return String(v).slice(0, 10);
+    };
+
+    const yearRows = (yearRowsRaw || []).map((y) => ({
+      start: toYYYYMMDD(y.start),
+      end: toYYYYMMDD(y.end),
+    }));
+
+    // ✅ If there are no year settings, still return a valid payload
+    if (!yearRows.length) {
+      return res.json({
+        success: true,
+        employee: { name, lastName, allowanceDays },
+        currentYearKey: null,
+        years: [],
+      });
+    }
+
+    // Helpers: date parse expressions from stored strings dd/mm/yyyy (...)
     const startDateSql = `STR_TO_DATE(SUBSTRING_INDEX(startDate, ' ', 1), '%d/%m/%Y')`;
     const requestDateSql = `STR_TO_DATE(SUBSTRING_INDEX(requestDate, ' ', 1), '%d/%m/%Y')`;
 
-    // Helper: determine the holiday-year window for a given JS Date
+    // Helper: map JS Date -> holiday year window from HolidayYearSettings
     const findYearWindowForDate = (dateObj) => {
       for (const y of yearRows) {
-        const ys = new Date(y.start);
-        const ye = new Date(y.end);
-        // Normalize time
-        ys.setHours(0, 0, 0, 0);
-        ye.setHours(23, 59, 59, 999);
+        const ys = new Date(y.start + "T00:00:00");
+        const ye = new Date(y.end + "T23:59:59");
         if (dateObj >= ys && dateObj <= ye) {
           return { start: y.start, end: y.end };
         }
@@ -3007,16 +3036,13 @@ app.get("/holidays", async (req, res) => {
       return null;
     };
 
-    // Helper: compute accrual for a given year window
+    // Helper: compute accrual for a year window (linear daily)
     const calcAccrued = (yearStart, yearEnd) => {
       if (!allowanceDays) return 0;
 
       const today = new Date();
-      const ys = new Date(yearStart);
-      const ye = new Date(yearEnd);
-
-      ys.setHours(0, 0, 0, 0);
-      ye.setHours(23, 59, 59, 999);
+      const ys = new Date(yearStart + "T00:00:00");
+      const ye = new Date(yearEnd + "T23:59:59");
 
       if (today < ys) return 0;
       if (today > ye) return allowanceDays;
@@ -3040,7 +3066,7 @@ app.get("/holidays", async (req, res) => {
       [name, lastName]
     );
 
-    // 4) Normalize a row into a UI-friendly shape
+    // 4) Normalize a Holiday row into UI-friendly shape
     const normalizeRow = (row) => {
       const acceptedRaw = (row.accepted ?? "").toString().trim().toLowerCase();
       const who = (row.who ?? "").toString();
@@ -3052,7 +3078,8 @@ app.get("/holidays", async (req, res) => {
 
       let status = "Pending";
       if (isDeclined) status = "Declined";
-      else if (isApproved) status = isUnpaid ? "Approved (Unpaid)" : "Approved (Paid)";
+      else if (isApproved)
+        status = isUnpaid ? "Approved (Unpaid)" : "Approved (Paid)";
 
       return {
         startDate: row.startDate ?? "",
@@ -3061,14 +3088,13 @@ app.get("/holidays", async (req, res) => {
         days: Number(row.days ?? 0) || 0,
         who: who ?? "",
         notes: row.notes ?? "",
-        status,
-        type,               // "Paid" / "Unpaid"
+        status, // Pending / Approved(Paid/Unpaid) / Declined
+        type,   // Paid / Unpaid
         accepted: acceptedRaw,
       };
     };
 
-    // 5) Group into holiday years based on the custom year boundaries
-    // We'll use a key: "YYYY-MM-DD → YYYY-MM-DD"
+    // 5) Build year buckets for ALL HolidayYearSettings rows (even if user has no holidays)
     const yearsMap = new Map();
 
     const ensureYearBucket = (yearStart, yearEnd) => {
@@ -3096,21 +3122,28 @@ app.get("/holidays", async (req, res) => {
       return yearsMap.get(key);
     };
 
-    // We need start date as real date to map into year
-    // Convert MySQL STR_TO_DATE in SQL? We already pulled strings, so parse dd/mm/yyyy:
+    // ✅ Pre-create buckets
+    for (const y of yearRows) {
+      ensureYearBucket(y.start, y.end);
+    }
+
+    // Parse "dd/mm/yyyy (Day)" => Date
     const parseDDMMYYYY = (s) => {
-      const d = (s ?? "").toString().trim().split(" ")[0];
+      const d = (s ?? "").toString().trim().split(" ")[0]; // dd/mm/yyyy
       const parts = d.split("/");
       if (parts.length !== 3) return null;
+
       const dd = parseInt(parts[0], 10);
       const mm = parseInt(parts[1], 10);
       const yyyy = parseInt(parts[2], 10);
       if (!dd || !mm || !yyyy) return null;
+
       const dt = new Date(yyyy, mm - 1, dd);
       dt.setHours(0, 0, 0, 0);
       return dt;
     };
 
+    // 6) Place each holiday into the correct holiday-year bucket
     for (const row of allRows) {
       const startDt = parseDDMMYYYY(row.startDate);
       if (!startDt) continue;
@@ -3122,60 +3155,69 @@ app.get("/holidays", async (req, res) => {
       const item = normalizeRow(row);
 
       const days = item.days || 0;
-      const status = item.status.toLowerCase();
-      const type = item.type.toLowerCase(); // paid/unpaid
+      const statusLower = item.status.toLowerCase();
+      const typeLower = item.type.toLowerCase();
 
-      if (status.startsWith("approved")) {
+      if (statusLower.startsWith("approved")) {
         bucket.approvedHolidays.push(item);
-        if (type === "paid") bucket.takenPaidDays += days;
+        if (typeLower === "paid") bucket.takenPaidDays += days;
         else bucket.takenUnpaidDays += days;
-      } else if (status === "declined") {
+      } else if (statusLower === "declined") {
         bucket.declinedHolidays.push(item);
         bucket.declinedDays += days;
       } else {
         bucket.pendingHolidays.push(item);
-        if (type === "paid") bucket.pendingPaidDays += days;
+        if (typeLower === "paid") bucket.pendingPaidDays += days;
         else bucket.pendingUnpaidDays += days;
       }
     }
 
-    // 6) Finalize per-year remaining values
+    // 7) Finalize remaining values per year
     const years = Array.from(yearsMap.values())
       .map((y) => {
         const remainingYearDays = Math.max(0, y.allowanceDays - y.takenPaidDays);
-        const availableNowDays = Math.max(0, Math.min(y.accruedDays, y.allowanceDays) - y.takenPaidDays);
+        const availableNowDays = Math.max(
+          0,
+          Math.min(y.accruedDays, y.allowanceDays) - y.takenPaidDays
+        );
 
         return {
           ...y,
+          accruedDays: Number((y.accruedDays ?? 0).toFixed(2)),
+          takenPaidDays: Number((y.takenPaidDays ?? 0).toFixed(2)),
+          takenUnpaidDays: Number((y.takenUnpaidDays ?? 0).toFixed(2)),
+          pendingPaidDays: Number((y.pendingPaidDays ?? 0).toFixed(2)),
+          pendingUnpaidDays: Number((y.pendingUnpaidDays ?? 0).toFixed(2)),
+          declinedDays: Number((y.declinedDays ?? 0).toFixed(2)),
           remainingYearDays: Number(remainingYearDays.toFixed(2)),
           availableNowDays: Number(availableNowDays.toFixed(2)),
         };
       })
-      // sort latest year first
       .sort((a, b) => new Date(b.start) - new Date(a.start));
 
-    // Current year (the one where today fits)
+    // 8) Current year key (the one where today fits)
     const today = new Date();
     let currentYearKey = null;
     for (const y of years) {
-      const ys = new Date(y.start); ys.setHours(0, 0, 0, 0);
-      const ye = new Date(y.end); ye.setHours(23, 59, 59, 999);
+      const ys = new Date(y.start + "T00:00:00");
+      const ye = new Date(y.end + "T23:59:59");
       if (today >= ys && today <= ye) {
         currentYearKey = y.key;
         break;
       }
     }
 
-    res.json({
+    return res.json({
       success: true,
       employee: { name, lastName, allowanceDays },
       currentYearKey,
       years,
     });
-
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: "Server error", error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
