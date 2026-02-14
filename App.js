@@ -12,6 +12,8 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increased limit for image uploads
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// ==================== HELPER FUNCTIONS ====================
+
 // Helper function to generate unique 16-digit code
 function generateUniqueCode() {
   // Generate 16-digit number
@@ -2966,8 +2968,9 @@ app.get("/holidays", async (req, res) => {
   try {
     const pool = getPool(db);
 
+    // 1) Employee
     const [employeeRows] = await pool.query(
-      "SELECT name, lastName FROM Employees WHERE email = ?",
+      "SELECT name, lastName, startHoliday FROM Employees WHERE email = ? LIMIT 1",
       [email]
     );
 
@@ -2976,81 +2979,198 @@ app.get("/holidays", async (req, res) => {
     }
 
     const { name, lastName } = employeeRows[0];
+    const allowanceDays = Number(employeeRows[0].startHoliday ?? 0) || 0;
 
-    const [settingsRows] = await pool.query(`
-      SELECT HolidayYearStart, HolidayYearEnd
+    // 2) Get ALL holiday years
+    const [yearRows] = await pool.query(`
+      SELECT HolidayYearStart AS start, HolidayYearEnd AS end
       FROM HolidayYearSettings
-      WHERE CURDATE() BETWEEN HolidayYearStart AND HolidayYearEnd
-      LIMIT 1
+      ORDER BY HolidayYearStart DESC
     `);
 
-    const yearStart = settingsRows[0].HolidayYearStart;
-    const yearEnd = settingsRows[0].HolidayYearEnd;
-
+    // Helper: date parse expression from your stored strings dd/mm/yyyy (...)
     const startDateSql = `STR_TO_DATE(SUBSTRING_INDEX(startDate, ' ', 1), '%d/%m/%Y')`;
     const requestDateSql = `STR_TO_DATE(SUBSTRING_INDEX(requestDate, ' ', 1), '%d/%m/%Y')`;
 
-    const [pendingRows] = await pool.query(`
-      SELECT * FROM Holiday
-      WHERE name = ? AND lastName = ?
-      AND (
-          accepted IS NULL
-          OR TRIM(accepted) = ''
-          OR LOWER(TRIM(accepted)) = 'unpaid'
-      )
-      AND (who IS NULL OR TRIM(who) = '')
-      ORDER BY ${requestDateSql} DESC
-    `, [name, lastName]);
+    // Helper: determine the holiday-year window for a given JS Date
+    const findYearWindowForDate = (dateObj) => {
+      for (const y of yearRows) {
+        const ys = new Date(y.start);
+        const ye = new Date(y.end);
+        // Normalize time
+        ys.setHours(0, 0, 0, 0);
+        ye.setHours(23, 59, 59, 999);
+        if (dateObj >= ys && dateObj <= ye) {
+          return { start: y.start, end: y.end };
+        }
+      }
+      return null;
+    };
 
-    const [currentRows] = await pool.query(`
-      SELECT * FROM Holiday
-      WHERE name = ? AND lastName = ?
-      AND who IS NOT NULL AND TRIM(who) <> ''
-      AND ${startDateSql} BETWEEN ? AND ?
-      ORDER BY ${startDateSql} ASC
-    `, [name, lastName, yearStart, yearEnd]);
+    // Helper: compute accrual for a given year window
+    const calcAccrued = (yearStart, yearEnd) => {
+      if (!allowanceDays) return 0;
 
-    const [pastRows] = await pool.query(`
-      SELECT *, YEAR(${startDateSql}) AS holidayYear
+      const today = new Date();
+      const ys = new Date(yearStart);
+      const ye = new Date(yearEnd);
+
+      ys.setHours(0, 0, 0, 0);
+      ye.setHours(23, 59, 59, 999);
+
+      if (today < ys) return 0;
+      if (today > ye) return allowanceDays;
+
+      const msPerDay = 24 * 60 * 60 * 1000;
+      const totalDays = Math.floor((ye - ys) / msPerDay) + 1;
+      const elapsedDays = Math.floor((today - ys) / msPerDay) + 1;
+
+      const accrued = (allowanceDays * elapsedDays) / totalDays;
+      return Math.min(allowanceDays, accrued);
+    };
+
+    // 3) Pull ALL employee holidays (approved + pending + declined)
+    const [allRows] = await pool.query(
+      `
+      SELECT *
       FROM Holiday
       WHERE name = ? AND lastName = ?
-      AND who IS NOT NULL AND TRIM(who) <> ''
-      AND ${startDateSql} < ?
-      ORDER BY ${startDateSql} DESC
-    `, [name, lastName, yearStart]);
+      ORDER BY ${requestDateSql} DESC
+      `,
+      [name, lastName]
+    );
 
-    const formatRow = (row) => {
-      const accepted = (row.accepted || '').toLowerCase();
-      const isUnpaid = accepted === 'unpaid';
-      const isApproved = row.who && row.who.trim() !== '';
+    // 4) Normalize a row into a UI-friendly shape
+    const normalizeRow = (row) => {
+      const acceptedRaw = (row.accepted ?? "").toString().trim().toLowerCase();
+      const who = (row.who ?? "").toString();
+      const isApproved = who.trim() !== "";
+      const isUnpaid = acceptedRaw === "unpaid";
+      const isDeclined = acceptedRaw === "false";
+
+      const type = isUnpaid ? "Unpaid" : "Paid";
+
+      let status = "Pending";
+      if (isDeclined) status = "Declined";
+      else if (isApproved) status = isUnpaid ? "Approved (Unpaid)" : "Approved (Paid)";
 
       return {
-        startDate: row.startDate,
-        endDate: row.endDate,
-        requestDate: row.requestDate,
-        days: row.days || 0,
-        who: row.who || '',
-        notes: row.notes || '',
-        status: !isApproved ? "Pending"
-              : accepted === 'false' ? "Declined"
-              : isUnpaid ? "Approved Unpaid"
-              : "Approved Paid"
+        startDate: row.startDate ?? "",
+        endDate: row.endDate ?? "",
+        requestDate: row.requestDate ?? "",
+        days: Number(row.days ?? 0) || 0,
+        who: who ?? "",
+        notes: row.notes ?? "",
+        status,
+        type,               // "Paid" / "Unpaid"
+        accepted: acceptedRaw,
       };
     };
 
-    const pastByYear = {};
-    for (const row of pastRows) {
-      const y = String(row.holidayYear || "Unknown");
-      if (!pastByYear[y]) pastByYear[y] = [];
-      pastByYear[y].push(formatRow(row));
+    // 5) Group into holiday years based on the custom year boundaries
+    // We'll use a key: "YYYY-MM-DD → YYYY-MM-DD"
+    const yearsMap = new Map();
+
+    const ensureYearBucket = (yearStart, yearEnd) => {
+      const key = `${yearStart} → ${yearEnd}`;
+      if (!yearsMap.has(key)) {
+        yearsMap.set(key, {
+          key,
+          start: yearStart,
+          end: yearEnd,
+
+          allowanceDays,
+          accruedDays: Number(calcAccrued(yearStart, yearEnd).toFixed(2)),
+
+          takenPaidDays: 0,
+          takenUnpaidDays: 0,
+          pendingPaidDays: 0,
+          pendingUnpaidDays: 0,
+          declinedDays: 0,
+
+          pendingHolidays: [],
+          approvedHolidays: [],
+          declinedHolidays: [],
+        });
+      }
+      return yearsMap.get(key);
+    };
+
+    // We need start date as real date to map into year
+    // Convert MySQL STR_TO_DATE in SQL? We already pulled strings, so parse dd/mm/yyyy:
+    const parseDDMMYYYY = (s) => {
+      const d = (s ?? "").toString().trim().split(" ")[0];
+      const parts = d.split("/");
+      if (parts.length !== 3) return null;
+      const dd = parseInt(parts[0], 10);
+      const mm = parseInt(parts[1], 10);
+      const yyyy = parseInt(parts[2], 10);
+      if (!dd || !mm || !yyyy) return null;
+      const dt = new Date(yyyy, mm - 1, dd);
+      dt.setHours(0, 0, 0, 0);
+      return dt;
+    };
+
+    for (const row of allRows) {
+      const startDt = parseDDMMYYYY(row.startDate);
+      if (!startDt) continue;
+
+      const win = findYearWindowForDate(startDt);
+      if (!win) continue;
+
+      const bucket = ensureYearBucket(win.start, win.end);
+      const item = normalizeRow(row);
+
+      const days = item.days || 0;
+      const status = item.status.toLowerCase();
+      const type = item.type.toLowerCase(); // paid/unpaid
+
+      if (status.startsWith("approved")) {
+        bucket.approvedHolidays.push(item);
+        if (type === "paid") bucket.takenPaidDays += days;
+        else bucket.takenUnpaidDays += days;
+      } else if (status === "declined") {
+        bucket.declinedHolidays.push(item);
+        bucket.declinedDays += days;
+      } else {
+        bucket.pendingHolidays.push(item);
+        if (type === "paid") bucket.pendingPaidDays += days;
+        else bucket.pendingUnpaidDays += days;
+      }
+    }
+
+    // 6) Finalize per-year remaining values
+    const years = Array.from(yearsMap.values())
+      .map((y) => {
+        const remainingYearDays = Math.max(0, y.allowanceDays - y.takenPaidDays);
+        const availableNowDays = Math.max(0, Math.min(y.accruedDays, y.allowanceDays) - y.takenPaidDays);
+
+        return {
+          ...y,
+          remainingYearDays: Number(remainingYearDays.toFixed(2)),
+          availableNowDays: Number(availableNowDays.toFixed(2)),
+        };
+      })
+      // sort latest year first
+      .sort((a, b) => new Date(b.start) - new Date(a.start));
+
+    // Current year (the one where today fits)
+    const today = new Date();
+    let currentYearKey = null;
+    for (const y of years) {
+      const ys = new Date(y.start); ys.setHours(0, 0, 0, 0);
+      const ye = new Date(y.end); ye.setHours(23, 59, 59, 999);
+      if (today >= ys && today <= ye) {
+        currentYearKey = y.key;
+        break;
+      }
     }
 
     res.json({
       success: true,
-      holidayYear: { start: yearStart, end: yearEnd },
-      pendingHolidays: pendingRows.map(formatRow),
-      currentHolidays: currentRows.map(formatRow),
-      pastByYear
+      employee: { name, lastName, allowanceDays },
+      currentYearKey,
+      years,
     });
 
   } catch (err) {
