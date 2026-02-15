@@ -2498,8 +2498,13 @@ app.get("/profile/employees", async (req, res) => {
 
     const e = rows[0];
 
-    // Salary logic (Salary column can be "Yes"/"No" or 1/0 depending on your DB)
-    const salaryYes = String(e.Salary ?? "").trim().toLowerCase() === "yes" || Number(e.Salary) === 1;
+    const salaryYes =
+      String(e.Salary ?? "").trim().toLowerCase() === "yes" || Number(e.Salary) === 1;
+
+    // ✅ LONGBLOB comes as Buffer -> convert to base64 string
+    const profileImageBase64 = Buffer.isBuffer(e.profileImage)
+      ? e.profileImage.toString("base64")
+      : "";
 
     res.json({
       success: true,
@@ -2515,14 +2520,15 @@ app.get("/profile/employees", async (req, res) => {
         position: e.position ?? "",
 
         contractHours: e.contractHours ?? "",
-        dateStart: e.dateStart ?? "",          // yyyy-mm-dd (frontend converts)
+        dateStart: e.dateStart ?? "",
         startHoliday: e.startHoliday ?? 0,
 
         salaryYes,
         wage: salaryYes ? null : (e.wage ?? null),
         salaryPrice: salaryYes ? (e.SalaryPrice ?? null) : null,
 
-        profileImage: e.profileImage ?? "",
+        // ✅ always send base64 string
+        profileImage: profileImageBase64,
         profileImageMime: e.profileImageMime ?? "",
       },
     });
@@ -2550,7 +2556,6 @@ app.patch("/profile/employees", async (req, res) => {
     const conn = await pool.getConnection();
 
     try {
-      // ✅ allowlist only (everything else ignored)
       const ALLOWED = new Set(["email", "phone", "address", "profileImage", "profileImageMime"]);
 
       const setParts = [];
@@ -2559,9 +2564,27 @@ app.patch("/profile/employees", async (req, res) => {
       for (const [k, v] of Object.entries(updates)) {
         if (!ALLOWED.has(k)) continue;
 
-        // Normalize empty strings -> NULL for image fields
+        // ✅ clearing image
         if ((k === "profileImage" || k === "profileImageMime") && (v === "" || v === null)) {
           setParts.push(`${k} = NULL`);
+          continue;
+        }
+
+        // ✅ LONGBLOB: incoming base64 -> Buffer
+        if (k === "profileImage") {
+          if (typeof v !== "string") continue;
+          const raw = v.trim();
+          if (!raw) {
+            setParts.push(`profileImage = NULL`);
+            continue;
+          }
+
+          // supports "data:image/...;base64,...." too
+          const clean = raw.includes(",") ? raw.split(",").pop().trim() : raw;
+          const buf = Buffer.from(clean, "base64");
+
+          setParts.push(`profileImage = ?`);
+          values.push(buf);
           continue;
         }
 
@@ -2576,7 +2599,7 @@ app.patch("/profile/employees", async (req, res) => {
 
       await conn.beginTransaction();
 
-      // 1) Update Employees in current DB
+      // 1) Employees (current DB)
       values.push(oldEmail);
       const sqlEmployees = `UPDATE Employees SET ${setParts.join(", ")} WHERE email = ? LIMIT 1`;
       const [empResult] = await conn.query(sqlEmployees, values);
@@ -2587,17 +2610,12 @@ app.patch("/profile/employees", async (req, res) => {
         return res.status(404).json({ success: false, message: "Employee not found" });
       }
 
-      // 2) If email changed -> update Users tables too (current db + yassir_access)
+      // 2) If email changed -> update Users in current DB + yassir_access
       const emailChanged =
-        newEmail &&
-        newEmail.length > 3 &&
-        newEmail.toLowerCase() !== oldEmail.toLowerCase();
+        newEmail && newEmail.length > 3 && newEmail.toLowerCase() !== oldEmail.toLowerCase();
 
       if (emailChanged) {
-        // Current DB Users table
         await conn.query(`UPDATE Users SET email = ? WHERE email = ?`, [newEmail, oldEmail]);
-
-        // Main DB users table
         await conn.query(`UPDATE yassir_access.Users SET email = ? WHERE email = ?`, [newEmail, oldEmail]);
       }
 
@@ -2606,14 +2624,9 @@ app.patch("/profile/employees", async (req, res) => {
 
       return res.json({ success: true, message: "Profile updated" });
     } catch (err) {
-      try {
-        // rollback if transaction started
-        // (if beginTransaction failed, rollback will throw - ignore)
-        await conn.rollback();
-      } catch (_) {}
+      try { await conn.rollback(); } catch (_) {}
       conn.release();
 
-      // duplicate email
       if (String(err.code) === "ER_DUP_ENTRY") {
         return res.status(409).json({ success: false, message: "Email already exists" });
       }
