@@ -2426,11 +2426,11 @@ app.get("/employees", async (req, res) => {
     `);
 
     const employees = rows.map(r => {
-      let profileImageBase64 = null;
+      let profileImage = null;
 
       // If profileImage is stored as blob, convert to base64
       if (r.profileImage) {
-        profileImageBase64 = Buffer.from(r.profileImage).toString("base64");
+        profileImage = Buffer.from(r.profileImage).toString("base64");
       }
 
       return {
@@ -2439,7 +2439,7 @@ app.get("/employees", async (req, res) => {
         email: r.email ?? "",
         position: r.position ?? "",
         designation: (r.designation ?? "").toString().trim(),
-        profileImageBase64, // null if not present
+        profileImage, // null if not present
         profileImageMime: r.profileImageMime ?? null,
       };
     });
@@ -2483,7 +2483,7 @@ app.get("/profile/employees", async (req, res) => {
         contractHours,
         dateStart,
         startHoliday,
-        profileImageBase64,
+        profileImage,
         profileImageMime
       FROM Employees
       WHERE email = ?
@@ -2522,7 +2522,7 @@ app.get("/profile/employees", async (req, res) => {
         wage: salaryYes ? null : (e.wage ?? null),
         salaryPrice: salaryYes ? (e.SalaryPrice ?? null) : null,
 
-        profileImageBase64: e.profileImageBase64 ?? "",
+        profileImage: e.profileImage ?? "",
         profileImageMime: e.profileImageMime ?? "",
       },
     });
@@ -2551,7 +2551,7 @@ app.patch("/profile/employees", async (req, res) => {
 
     try {
       // ✅ allowlist only (everything else ignored)
-      const ALLOWED = new Set(["email", "phone", "address", "profileImageBase64", "profileImageMime"]);
+      const ALLOWED = new Set(["email", "phone", "address", "profileImage", "profileImageMime"]);
 
       const setParts = [];
       const values = [];
@@ -2560,7 +2560,7 @@ app.patch("/profile/employees", async (req, res) => {
         if (!ALLOWED.has(k)) continue;
 
         // Normalize empty strings -> NULL for image fields
-        if ((k === "profileImageBase64" || k === "profileImageMime") && (v === "" || v === null)) {
+        if ((k === "profileImage" || k === "profileImageMime") && (v === "" || v === null)) {
           setParts.push(`${k} = NULL`);
           continue;
         }
