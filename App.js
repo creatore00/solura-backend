@@ -2394,6 +2394,65 @@ app.get("/employee", async (req, res) => {
   }
 });
 
+// Employees List
+app.get("/employees", async (req, res) => {
+  const { db, email } = req.query;
+
+  if (!db) {
+    return res.status(400).json({ success: false, message: "Database is required" });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    // NOTE: adjust column names if your table uses different naming
+    // assuming Employees has: name, lastName, email, position, designation, profileImage, profileImageMime
+    const [rows] = await pool.query(`
+      SELECT 
+        name,
+        lastName,
+        email,
+        position,
+        designation,
+        profileImage,
+        profileImageMime
+      FROM Employees
+      ORDER BY
+        FIELD(UPPER(TRIM(designation)), 'AM', 'MANAGER', 'SUPERVISOR', 'TM') ASC,
+        lastName ASC,
+        name ASC
+    `);
+
+    const employees = rows.map(r => {
+      let profileImageBase64 = null;
+
+      // If profileImage is stored as blob, convert to base64
+      if (r.profileImage) {
+        profileImageBase64 = Buffer.from(r.profileImage).toString("base64");
+      }
+
+      return {
+        name: r.name ?? "",
+        lastName: r.lastName ?? "",
+        email: r.email ?? "",
+        position: r.position ?? "",
+        designation: (r.designation ?? "").toString().trim(),
+        profileImageBase64, // null if not present
+        profileImageMime: r.profileImageMime ?? null,
+      };
+    });
+
+    res.json({
+      success: true,
+      currentEmail: (email ?? "").toString().trim(),
+      employees,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
+
 // Get current week's rota
 app.get("/rota", async (req, res) => {
   const { db, name, lastName } = req.query;
