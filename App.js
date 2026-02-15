@@ -2417,6 +2417,8 @@ app.get("/employees", async (req, res) => {
         profileImage,
         profileImageMime
       FROM Employees
+      WHERE situation IS NULL
+      OR TRIM(situation) = ''
       ORDER BY
         FIELD(UPPER(TRIM(designation)), 'AM', 'MANAGER', 'SUPERVISOR', 'TM') ASC,
         lastName ASC,
@@ -2450,6 +2452,178 @@ app.get("/employees", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
+
+// Profile Endpoint
+app.get("/profile/employees", async (req, res) => {
+  const { db, email } = req.query;
+
+  if (!db || !email) {
+    return res.status(400).json({ success: false, message: "db and email are required" });
+  }
+
+  try {
+    const pool = getPool(db);
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        name,
+        lastName,
+        email,
+        phone,
+        address,
+        nin,
+        wage,
+        Salary,
+        SalaryPrice,
+        designation,
+        position,
+        contractHours,
+        dateStart,
+        startHoliday,
+        profileImageBase64,
+        profileImageMime
+      FROM Employees
+      WHERE email = ?
+      LIMIT 1
+      `,
+      [email]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "Employee not found" });
+    }
+
+    const e = rows[0];
+
+    // Salary logic (Salary column can be "Yes"/"No" or 1/0 depending on your DB)
+    const salaryYes = String(e.Salary ?? "").trim().toLowerCase() === "yes" || Number(e.Salary) === 1;
+
+    res.json({
+      success: true,
+      employee: {
+        name: e.name ?? "",
+        lastName: e.lastName ?? "",
+        email: e.email ?? "",
+        phone: e.phone ?? "",
+        address: e.address ?? "",
+        nin: e.nin ?? "",
+
+        designation: e.designation ?? "",
+        position: e.position ?? "",
+
+        contractHours: e.contractHours ?? "",
+        dateStart: e.dateStart ?? "",          // yyyy-mm-dd (frontend converts)
+        startHoliday: e.startHoliday ?? 0,
+
+        salaryYes,
+        wage: salaryYes ? null : (e.wage ?? null),
+        salaryPrice: salaryYes ? (e.SalaryPrice ?? null) : null,
+
+        profileImageBase64: e.profileImageBase64 ?? "",
+        profileImageMime: e.profileImageMime ?? "",
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error", error: err.message });
+  }
+});
+
+app.patch("/profile/employees", async (req, res) => {
+  const { db, email, updates } = req.body;
+
+  if (!db || !email || !updates || typeof updates !== "object") {
+    return res.status(400).json({
+      success: false,
+      message: "db, email, and updates object are required",
+    });
+  }
+
+  const oldEmail = String(email).trim();
+  const newEmail = updates.email != null ? String(updates.email).trim() : null;
+
+  try {
+    const pool = getPool(db);
+    const conn = await pool.getConnection();
+
+    try {
+      // ✅ allowlist only (everything else ignored)
+      const ALLOWED = new Set(["email", "phone", "address", "profileImageBase64", "profileImageMime"]);
+
+      const setParts = [];
+      const values = [];
+
+      for (const [k, v] of Object.entries(updates)) {
+        if (!ALLOWED.has(k)) continue;
+
+        // Normalize empty strings -> NULL for image fields
+        if ((k === "profileImageBase64" || k === "profileImageMime") && (v === "" || v === null)) {
+          setParts.push(`${k} = NULL`);
+          continue;
+        }
+
+        setParts.push(`${k} = ?`);
+        values.push(v);
+      }
+
+      if (!setParts.length) {
+        conn.release();
+        return res.status(400).json({ success: false, message: "No allowed fields to update" });
+      }
+
+      await conn.beginTransaction();
+
+      // 1) Update Employees in current DB
+      values.push(oldEmail);
+      const sqlEmployees = `UPDATE Employees SET ${setParts.join(", ")} WHERE email = ? LIMIT 1`;
+      const [empResult] = await conn.query(sqlEmployees, values);
+
+      if (!empResult.affectedRows) {
+        await conn.rollback();
+        conn.release();
+        return res.status(404).json({ success: false, message: "Employee not found" });
+      }
+
+      // 2) If email changed -> update Users tables too (current db + yassir_access)
+      const emailChanged =
+        newEmail &&
+        newEmail.length > 3 &&
+        newEmail.toLowerCase() !== oldEmail.toLowerCase();
+
+      if (emailChanged) {
+        // Current DB Users table
+        await conn.query(`UPDATE Users SET email = ? WHERE email = ?`, [newEmail, oldEmail]);
+
+        // Main DB users table
+        await conn.query(`UPDATE yassir_access.Users SET email = ? WHERE email = ?`, [newEmail, oldEmail]);
+      }
+
+      await conn.commit();
+      conn.release();
+
+      return res.json({ success: true, message: "Profile updated" });
+    } catch (err) {
+      try {
+        // rollback if transaction started
+        // (if beginTransaction failed, rollback will throw - ignore)
+        await conn.rollback();
+      } catch (_) {}
+      conn.release();
+
+      // duplicate email
+      if (String(err.code) === "ER_DUP_ENTRY") {
+        return res.status(409).json({ success: false, message: "Email already exists" });
+      }
+
+      console.error(err);
+      return res.status(500).json({ success: false, message: "Server error", error: err.message });
+    }
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Server error", error: err.message });
   }
 });
 
