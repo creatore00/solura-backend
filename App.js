@@ -4,8 +4,7 @@ import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { pool } from "./config/db.js"; // only for login users table
 import { getPool } from "./config/dbManager.js";
-import admin from 'firebase-admin';
-import serviceAccount from './path/to/your/service-account-key.json' assert { type: 'json' };
+import fs from 'fs';
 
 dotenv.config();
 
@@ -14,6 +13,11 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increased limit for image uploads
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Add this at the top of your backend file:
+import admin from 'firebase-admin';
+const serviceAccount = JSON.parse(
+  fs.readFileSync('C:\Users\yassi\Desktop\solura_app\solura_app_new\android\app\google-services.json', 'utf8')
+);
 // Initialize Firebase Admin
 if (!admin.apps.length) {
   admin.initializeApp({
