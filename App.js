@@ -2313,12 +2313,18 @@ app.get("/health", (req, res) => {
 });
 
 // In your Flutter app's backend (solura-backend.onrender.com)
+// Helper function per ottenere il pool queryable
+function getQueryPool() {
+    return pool.promise ? pool.promise() : pool;
+}
+
 app.post('/send-notification', async (req, res) => {
     try {
         const { userId, email, name, title, body, data } = req.body;
 
-        // Get the FCM token(s) for this user from your database
-        const [userTokens] = await pool.promise().query(
+        const queryPool = getQueryPool(); // Ottieni il pool giusto
+
+        const [userTokens] = await queryPool.query(
             'SELECT fcm_token FROM user_devices WHERE user_id = ? OR email = ?',
             [userId, email]
         );
@@ -2330,68 +2336,32 @@ app.post('/send-notification', async (req, res) => {
             });
         }
 
-        // Send push notification using FCM (Firebase Cloud Messaging)
+        // Send push notification using FCM
         const fcmPromises = userTokens.map(async (device) => {
             const message = {
                 token: device.fcm_token,
-                notification: {
-                    title: title,
-                    body: body,
-                },
-                data: {
-                    type: data.type,
-                    notificationSubtype: data.notificationSubtype,
-                    timestamp: data.timestamp,
-                    weekStart: data.weekStart || '',
-                    weekEnd: data.weekEnd || '',
-                    action: data.action || 'view_rota',
-                    click_action: 'FLUTTER_NOTIFICATION_CLICK',
-                },
-                android: {
-                    priority: 'high',
-                    notification: {
-                        sound: 'default',
-                        channelId: 'rota_notifications'
-                    }
-                },
-                apns: {
-                    payload: {
-                        aps: {
-                            sound: 'default',
-                            badge: 1
-                        },
-                    },
-                },
+                notification: { title, body },
+                data: { ...data }
             };
-
             return admin.messaging().send(message);
         });
 
         const fcmResults = await Promise.allSettled(fcmPromises);
         
-        // Log any failures
-        fcmResults.forEach((result, index) => {
-            if (result.status === 'rejected') {
-                console.error(`Failed to send to token ${userTokens[index]?.fcm_token}:`, result.reason);
-            }
-        });
-
-        // Save notification to database using your existing Notifications table structure
-        const notificationType = data.notificationSubtype === 'new' ? 'ROTA_NEW' : 'ROTA_UPDATED';
-        
-        await pool.promise().query(
+        // Salva notifica nel database
+        await queryPool.query(
             `INSERT INTO Notifications 
             (targetRole, title, message, type, postId, isRead, createdAt, targetEmail, authorEmail) 
             VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
             [
-                'EMPLOYEE', // or get the actual role from your database
+                data.role || 'EMPLOYEE',
                 title,
                 body,
-                'SYSTEM', // Using SYSTEM type as it's a system notification
+                'SYSTEM',
                 data.postId || null,
-                0, // isRead = false
-                email, // targetEmail
-                'system@solura.com' // authorEmail (system generated)
+                0,
+                email,
+                'system@solura.com'
             ]
         );
 
