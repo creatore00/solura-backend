@@ -2338,6 +2338,43 @@ function getQueryPool() {
     return pool.promise ? pool.promise() : pool;
 }
 
+// Login Endpoint
+app.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ success: false, message: "Email and password required" });
+
+  try {
+    const trimmedEmail = email.trim();
+    const [rows] = await pool.query(
+      "SELECT Email, Password, Access, db_name FROM users WHERE Email = ?",
+      [trimmedEmail]
+    );
+
+    if (!rows || rows.length === 0)
+      return res.json({ success: false, message: "Invalid email or password" });
+
+    const databases = [];
+    let loginSuccess = false;
+
+    for (const row of rows) {
+      const match = await bcrypt.compare(password, row.Password);
+      if (match) {
+        loginSuccess = true;
+        databases.push({ db_name: row.db_name, access: row.Access });
+      }
+    }
+
+    if (!loginSuccess) return res.json({ success: false, message: "Invalid email or password" });
+    if (databases.length === 0) return res.json({ success: false, message: "No databases available" });
+
+    return res.json({ success: true, message: "Login successful", email: trimmedEmail, databases });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 app.post('/send-notification', async (req, res) => {
     try {
         const { userId, email, name, title, body, data, dbName } = req.body;
