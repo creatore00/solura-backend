@@ -2312,6 +2312,141 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", message: "Solura backend is running" });
 });
 
+// In your Flutter app's backend (solura-backend.onrender.com)
+app.post('/send-notification', async (req, res) => {
+    try {
+        const { userId, email, name, title, body, data } = req.body;
+
+        // Get the FCM token(s) for this user from your database
+        const [userTokens] = await pool.promise().query(
+            'SELECT fcm_token FROM user_devices WHERE user_id = ? OR email = ?',
+            [userId, email]
+        );
+
+        if (userTokens.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                message: 'No device tokens found for user' 
+            });
+        }
+
+        // Send push notification using FCM (Firebase Cloud Messaging)
+        const fcmPromises = userTokens.map(async (device) => {
+            const message = {
+                token: device.fcm_token,
+                notification: {
+                    title: title,
+                    body: body,
+                },
+                data: {
+                    type: data.type,
+                    notificationSubtype: data.notificationSubtype,
+                    timestamp: data.timestamp,
+                    weekStart: data.weekStart || '',
+                    weekEnd: data.weekEnd || '',
+                    action: data.action || 'view_rota',
+                    click_action: 'FLUTTER_NOTIFICATION_CLICK',
+                },
+                android: {
+                    priority: 'high',
+                    notification: {
+                        sound: 'default',
+                        channelId: 'rota_notifications'
+                    }
+                },
+                apns: {
+                    payload: {
+                        aps: {
+                            sound: 'default',
+                            badge: 1
+                        },
+                    },
+                },
+            };
+
+            return admin.messaging().send(message);
+        });
+
+        const fcmResults = await Promise.allSettled(fcmPromises);
+        
+        // Log any failures
+        fcmResults.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                console.error(`Failed to send to token ${userTokens[index]?.fcm_token}:`, result.reason);
+            }
+        });
+
+        // Save notification to database using your existing Notifications table structure
+        const notificationType = data.notificationSubtype === 'new' ? 'ROTA_NEW' : 'ROTA_UPDATED';
+        
+        await pool.promise().query(
+            `INSERT INTO Notifications 
+            (targetRole, title, message, type, postId, isRead, createdAt, targetEmail, authorEmail) 
+            VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
+            [
+                'EMPLOYEE', // or get the actual role from your database
+                title,
+                body,
+                'SYSTEM', // Using SYSTEM type as it's a system notification
+                data.postId || null,
+                0, // isRead = false
+                email, // targetEmail
+                'system@solura.com' // authorEmail (system generated)
+            ]
+        );
+
+        res.json({ 
+            success: true, 
+            message: 'Notification sent successfully',
+            deliveredCount: fcmResults.filter(r => r.status === 'fulfilled').length
+        });
+    } catch (error) {
+        console.error('Error sending notification:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error sending notification: ' + error.message 
+        });
+    }
+});
+
+// Endpoint for Flutter app to register FCM tokens
+app.post('/register-device', async (req, res) => {
+    try {
+        const { userId, email, fcmToken, deviceType } = req.body;
+
+        // Validate required fields
+        if (!userId || !email || !fcmToken) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Missing required fields' 
+            });
+        }
+
+        // Save or update the FCM token in user_devices table
+        const [result] = await pool.promise().query(
+            `INSERT INTO user_devices (user_id, email, fcm_token, device_type, updated_at) 
+             VALUES (?, ?, ?, ?, NOW()) 
+             ON DUPLICATE KEY UPDATE 
+             user_id = VALUES(user_id),
+             email = VALUES(email),
+             device_type = VALUES(device_type),
+             updated_at = NOW()`,
+            [userId, email, fcmToken, deviceType || 'android']
+        );
+
+        res.json({ 
+            success: true, 
+            message: 'Device registered successfully' 
+        });
+    } catch (error) {
+        console.error('Error registering device:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error registering device: ' + error.message 
+        });
+    }
+});
+
 // Login
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
