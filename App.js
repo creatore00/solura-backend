@@ -2321,7 +2321,13 @@ function getQueryPool() {
 app.post('/send-notification', async (req, res) => {
     try {
         const { userId, email, name, title, body, data, dbName } = req.body; // 👈 AGGIUNGI dbName
-
+        
+        console.log('Received notification request:', { 
+            email, 
+            dbName, 
+            hasDbName: !!dbName,
+            bodyKeys: Object.keys(req.body)
+        });
         if (!dbName) {
             return res.status(400).json({ 
                 success: false, 
