@@ -15,14 +15,21 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Add this at the top of your backend file:
 import admin from 'firebase-admin';
-const serviceAccount = JSON.parse(
-  fs.readFileSync('C:\Users\yassi\Desktop\solura_app\solura_app_new\android\app\google-services.json', 'utf8')
-);
-// Initialize Firebase Admin
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+// Initialize Firebase Admin from environment variable
+let firebaseInitialized = false;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    firebaseInitialized = true;
+    console.log('✅ Firebase Admin initialized from environment variable');
+  } else {
+    console.log('⚠️ FIREBASE_SERVICE_ACCOUNT environment variable not set');
+  }
+} catch (error) {
+  console.error('❌ Error initializing Firebase Admin:', error.message);
 }
 
 // ==================== HELPER FUNCTIONS ====================
