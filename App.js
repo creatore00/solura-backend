@@ -2320,15 +2320,24 @@ function getQueryPool() {
 
 app.post('/send-notification', async (req, res) => {
     try {
-        const { userId, email, name, title, body, data } = req.body;
+        const { userId, email, name, title, body, data, dbName } = req.body; // 👈 AGGIUNGI dbName
 
-        // ✅ Usa la tabella corretta: biometric_devices
-        // Cerca sia per user_email che per email (per flessibilità)
-        const [userTokens] = await pool.query(
+        if (!dbName) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Database name is required' 
+            });
+        }
+
+        // Ottieni il pool per il database specifico
+        const dbPool = getPool(dbName); // Usa la stessa funzione getPool del backend principale
+
+        // Cerca i token dei dispositivi nella tabella biometric_devices del database specifico
+        const [userTokens] = await dbPool.query(
             `SELECT device_fingerprint as fcm_token, device_name 
              FROM biometric_devices 
-             WHERE user_email = ? OR user_email = ?`,
-            [email, email]
+             WHERE user_email = ?`,
+            [email]
         );
 
         if (userTokens.length === 0) {
@@ -2341,7 +2350,7 @@ app.post('/send-notification', async (req, res) => {
         // Send push notification using FCM (Firebase Cloud Messaging)
         const fcmPromises = userTokens.map(async (device) => {
             const message = {
-                token: device.fcm_token, // device_fingerprint è il token FCM?
+                token: device.fcm_token,
                 notification: {
                     title: title,
                     body: body,
@@ -2384,8 +2393,8 @@ app.post('/send-notification', async (req, res) => {
             }
         });
 
-        // Save notification to database using your Notifications table
-        await pool.query(
+        // Salva la notifica nel database specifico
+        await dbPool.query(
             `INSERT INTO Notifications 
             (targetRole, title, message, type, postId, isRead, createdAt, targetEmail, authorEmail) 
             VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
