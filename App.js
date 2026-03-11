@@ -2320,14 +2320,8 @@ function getQueryPool() {
 
 app.post('/send-notification', async (req, res) => {
     try {
-        const { userId, email, name, title, body, data, dbName } = req.body; // 👈 AGGIUNGI dbName
-        
-        console.log('Received notification request:', { 
-            email, 
-            dbName, 
-            hasDbName: !!dbName,
-            bodyKeys: Object.keys(req.body)
-        });
+        const { userId, email, name, title, body, data, dbName } = req.body;
+
         if (!dbName) {
             return res.status(400).json({ 
                 success: false, 
@@ -2336,13 +2330,14 @@ app.post('/send-notification', async (req, res) => {
         }
 
         // Ottieni il pool per il database specifico
-        const dbPool = getPool(dbName); // Usa la stessa funzione getPool del backend principale
+        const userPool = getPool(dbName);
+        const queryPool = userPool.promise ? userPool.promise() : userPool;
 
-        // Cerca i token dei dispositivi nella tabella biometric_devices del database specifico
-        const [userTokens] = await dbPool.query(
-            `SELECT device_fingerprint as fcm_token, device_name 
-             FROM biometric_devices 
-             WHERE user_email = ?`,
+        // Cerca i token nella tabella user_devices del database specifico
+        const [userTokens] = await queryPool.query(
+            `SELECT fcm_token, device_type 
+             FROM user_devices 
+             WHERE email = ?`,
             [email]
         );
 
@@ -2353,14 +2348,11 @@ app.post('/send-notification', async (req, res) => {
             });
         }
 
-        // Send push notification using FCM (Firebase Cloud Messaging)
+        // Send push notifications using FCM
         const fcmPromises = userTokens.map(async (device) => {
             const message = {
                 token: device.fcm_token,
-                notification: {
-                    title: title,
-                    body: body,
-                },
+                notification: { title, body },
                 data: {
                     type: data.type,
                     notificationSubtype: data.notificationSubtype,
@@ -2376,31 +2368,15 @@ app.post('/send-notification', async (req, res) => {
                         sound: 'default',
                         channelId: 'rota_notifications'
                     }
-                },
-                apns: {
-                    payload: {
-                        aps: {
-                            sound: 'default',
-                            badge: 1
-                        },
-                    },
-                },
+                }
             };
-
             return admin.messaging().send(message);
         });
 
         const fcmResults = await Promise.allSettled(fcmPromises);
         
-        // Log any failures
-        fcmResults.forEach((result, index) => {
-            if (result.status === 'rejected') {
-                console.error(`Failed to send to token ${userTokens[index]?.fcm_token}:`, result.reason);
-            }
-        });
-
         // Salva la notifica nel database specifico
-        await dbPool.query(
+        await queryPool.query(
             `INSERT INTO Notifications 
             (targetRole, title, message, type, postId, isRead, createdAt, targetEmail, authorEmail) 
             VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
