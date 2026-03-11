@@ -2320,14 +2320,8 @@ function getQueryPool() {
 
 app.post('/send-notification', async (req, res) => {
     try {
-        const { userId, email, name, title, body, data, dbName } = req.body; // 👈 AGGIUNGI dbName
-        
-        console.log('Received notification request:', { 
-            email, 
-            dbName, 
-            hasDbName: !!dbName,
-            bodyKeys: Object.keys(req.body)
-        });
+        const { userId, email, name, title, body, data, dbName } = req.body;
+
         if (!dbName) {
             return res.status(400).json({ 
                 success: false, 
@@ -2336,13 +2330,14 @@ app.post('/send-notification', async (req, res) => {
         }
 
         // Ottieni il pool per il database specifico
-        const dbPool = getPool(dbName); // Usa la stessa funzione getPool del backend principale
+        const userPool = getPool(dbName);
+        const queryPool = userPool.promise ? userPool.promise() : userPool;
 
-        // Cerca i token dei dispositivi nella tabella biometric_devices del database specifico
-        const [userTokens] = await dbPool.query(
-            `SELECT device_fingerprint as fcm_token, device_name 
-             FROM biometric_devices 
-             WHERE user_email = ?`,
+        // Cerca i token nella tabella user_devices del database specifico
+        const [userTokens] = await queryPool.query(
+            `SELECT fcm_token, device_type 
+             FROM user_devices 
+             WHERE email = ?`,
             [email]
         );
 
@@ -2353,14 +2348,11 @@ app.post('/send-notification', async (req, res) => {
             });
         }
 
-        // Send push notification using FCM (Firebase Cloud Messaging)
+        // Send push notifications using FCM
         const fcmPromises = userTokens.map(async (device) => {
             const message = {
                 token: device.fcm_token,
-                notification: {
-                    title: title,
-                    body: body,
-                },
+                notification: { title, body },
                 data: {
                     type: data.type,
                     notificationSubtype: data.notificationSubtype,
@@ -2376,31 +2368,15 @@ app.post('/send-notification', async (req, res) => {
                         sound: 'default',
                         channelId: 'rota_notifications'
                     }
-                },
-                apns: {
-                    payload: {
-                        aps: {
-                            sound: 'default',
-                            badge: 1
-                        },
-                    },
-                },
+                }
             };
-
             return admin.messaging().send(message);
         });
 
         const fcmResults = await Promise.allSettled(fcmPromises);
         
-        // Log any failures
-        fcmResults.forEach((result, index) => {
-            if (result.status === 'rejected') {
-                console.error(`Failed to send to token ${userTokens[index]?.fcm_token}:`, result.reason);
-            }
-        });
-
         // Salva la notifica nel database specifico
-        await dbPool.query(
+        await queryPool.query(
             `INSERT INTO Notifications 
             (targetRole, title, message, type, postId, isRead, createdAt, targetEmail, authorEmail) 
             VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
@@ -2433,31 +2409,38 @@ app.post('/send-notification', async (req, res) => {
 // Endpoint for Flutter app to register FCM tokens
 app.post('/register-device', async (req, res) => {
     try {
-        const { userId, email, fcmToken, deviceType } = req.body;
+        const { userId, email, fcmToken, deviceType, dbName } = req.body; // 👈 AGGIUNGI dbName
 
         // Validate required fields
-        if (!userId || !email || !fcmToken) {
+        if (!userId || !email || !fcmToken || !dbName) { // 👈 dbName è richiesto
             return res.status(400).json({ 
                 success: false, 
-                message: 'Missing required fields' 
+                message: 'Missing required fields (userId, email, fcmToken, dbName)' 
             });
         }
 
-        // Save or update the FCM token in user_devices table
-        const [result] = await pool.promise().query(
-            `INSERT INTO user_devices (user_id, email, fcm_token, device_type, updated_at) 
-             VALUES (?, ?, ?, ?, NOW()) 
-             ON DUPLICATE KEY UPDATE 
-             user_id = VALUES(user_id),
-             email = VALUES(email),
-             device_type = VALUES(device_type),
-             updated_at = NOW()`,
+        // Ottieni il pool per il database specifico dell'utente
+        const userPool = getPool(dbName); // Usa la stessa funzione getPool
+
+        // Ottieni il pool queryabile (senza .promise())
+        const queryPool = userPool.promise ? userPool.promise() : userPool;
+
+        // Salva nella tabella user_devices del database specifico
+        const [result] = await queryPool.query(
+            `INSERT INTO user_devices 
+            (user_id, email, fcm_token, device_type, updated_at) 
+            VALUES (?, ?, ?, ?, NOW()) 
+            ON DUPLICATE KEY UPDATE 
+            fcm_token = VALUES(fcm_token),
+            device_type = VALUES(device_type),
+            updated_at = NOW()`,
             [userId, email, fcmToken, deviceType || 'android']
         );
 
         res.json({ 
             success: true, 
-            message: 'Device registered successfully' 
+            message: 'Device registered successfully',
+            deviceId: result.insertId
         });
     } catch (error) {
         console.error('Error registering device:', error);
@@ -2466,43 +2449,6 @@ app.post('/register-device', async (req, res) => {
             message: 'Error registering device: ' + error.message 
         });
     }
-});
-
-// Login
-app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password)
-    return res.status(400).json({ success: false, message: "Email and password required" });
-
-  try {
-    const trimmedEmail = email.trim();
-    const [rows] = await pool.query(
-      "SELECT Email, Password, Access, db_name FROM users WHERE Email = ?",
-      [trimmedEmail]
-    );
-
-    if (!rows || rows.length === 0)
-      return res.json({ success: false, message: "Invalid email or password" });
-
-    const databases = [];
-    let loginSuccess = false;
-
-    for (const row of rows) {
-      const match = await bcrypt.compare(password, row.Password);
-      if (match) {
-        loginSuccess = true;
-        databases.push({ db_name: row.db_name, access: row.Access });
-      }
-    }
-
-    if (!loginSuccess) return res.json({ success: false, message: "Invalid email or password" });
-    if (databases.length === 0) return res.json({ success: false, message: "No databases available" });
-
-    return res.json({ success: true, message: "Login successful", email: trimmedEmail, databases });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, message: "Server error" });
-  }
 });
 
 // Switch database endpoint
