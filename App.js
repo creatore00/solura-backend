@@ -4,6 +4,8 @@ import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { pool } from "./config/db.js"; // only for login users table
 import { getPool } from "./config/dbManager.js";
+import admin from 'firebase-admin';
+import serviceAccount from './path/to/your/service-account-key.json' assert { type: 'json' };
 
 dotenv.config();
 
@@ -11,6 +13,13 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increased limit for image uploads
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Initialize Firebase Admin
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -2406,13 +2415,15 @@ app.post('/send-notification', async (req, res) => {
     }
 });
 
-// Endpoint for Flutter app to register FCM tokens
+// Endpoint for Flutter app to register FCM tokens - FIXED VERSION
 app.post('/register-device', async (req, res) => {
     try {
-        const { userId, email, fcmToken, deviceType, dbName } = req.body; // 👈 AGGIUNGI dbName
+        const { userId, email, fcmToken, deviceType, dbName } = req.body;
+
+        console.log('📱 Registering device:', { userId, email, dbName, deviceType });
 
         // Validate required fields
-        if (!userId || !email || !fcmToken || !dbName) { // 👈 dbName è richiesto
+        if (!userId || !email || !fcmToken || !dbName) {
             return res.status(400).json({ 
                 success: false, 
                 message: 'Missing required fields (userId, email, fcmToken, dbName)' 
@@ -2420,13 +2431,30 @@ app.post('/register-device', async (req, res) => {
         }
 
         // Ottieni il pool per il database specifico dell'utente
-        const userPool = getPool(dbName); // Usa la stessa funzione getPool
-
-        // Ottieni il pool queryabile (senza .promise())
-        const queryPool = userPool.promise ? userPool.promise() : userPool;
+        const userPool = getPool(dbName);
+        
+        // First, check if user_devices table exists, if not create it
+        try {
+            await userPool.query(`
+                CREATE TABLE IF NOT EXISTS user_devices (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    email VARCHAR(255) NOT NULL,
+                    fcm_token VARCHAR(255) NOT NULL,
+                    device_type VARCHAR(50) DEFAULT 'android',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY unique_user_token (user_id, fcm_token),
+                    INDEX idx_email (email)
+                )
+            `);
+            console.log('✅ user_devices table checked/created');
+        } catch (tableError) {
+            console.error('❌ Error creating user_devices table:', tableError);
+        }
 
         // Salva nella tabella user_devices del database specifico
-        const [result] = await queryPool.query(
+        const [result] = await userPool.query(
             `INSERT INTO user_devices 
             (user_id, email, fcm_token, device_type, updated_at) 
             VALUES (?, ?, ?, ?, NOW()) 
@@ -2437,13 +2465,15 @@ app.post('/register-device', async (req, res) => {
             [userId, email, fcmToken, deviceType || 'android']
         );
 
+        console.log(`✅ Device registered successfully for ${email} in ${dbName}`);
+        
         res.json({ 
             success: true, 
             message: 'Device registered successfully',
             deviceId: result.insertId
         });
     } catch (error) {
-        console.error('Error registering device:', error);
+        console.error('❌ Error registering device:', error);
         res.status(500).json({ 
             success: false, 
             message: 'Error registering device: ' + error.message 
