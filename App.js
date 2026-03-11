@@ -2322,11 +2322,13 @@ app.post('/send-notification', async (req, res) => {
     try {
         const { userId, email, name, title, body, data } = req.body;
 
-        const queryPool = getQueryPool(); // Ottieni il pool giusto
-
-        const [userTokens] = await queryPool.query(
-            'SELECT fcm_token FROM user_devices WHERE user_id = ? OR email = ?',
-            [userId, email]
+        // ✅ Usa la tabella corretta: biometric_devices
+        // Cerca sia per user_email che per email (per flessibilità)
+        const [userTokens] = await pool.query(
+            `SELECT device_fingerprint as fcm_token, device_name 
+             FROM biometric_devices 
+             WHERE user_email = ? OR user_email = ?`,
+            [email, email]
         );
 
         if (userTokens.length === 0) {
@@ -2336,20 +2338,54 @@ app.post('/send-notification', async (req, res) => {
             });
         }
 
-        // Send push notification using FCM
+        // Send push notification using FCM (Firebase Cloud Messaging)
         const fcmPromises = userTokens.map(async (device) => {
             const message = {
-                token: device.fcm_token,
-                notification: { title, body },
-                data: { ...data }
+                token: device.fcm_token, // device_fingerprint è il token FCM?
+                notification: {
+                    title: title,
+                    body: body,
+                },
+                data: {
+                    type: data.type,
+                    notificationSubtype: data.notificationSubtype,
+                    timestamp: data.timestamp,
+                    weekStart: data.weekStart || '',
+                    weekEnd: data.weekEnd || '',
+                    action: data.action || 'view_rota',
+                    click_action: 'FLUTTER_NOTIFICATION_CLICK',
+                },
+                android: {
+                    priority: 'high',
+                    notification: {
+                        sound: 'default',
+                        channelId: 'rota_notifications'
+                    }
+                },
+                apns: {
+                    payload: {
+                        aps: {
+                            sound: 'default',
+                            badge: 1
+                        },
+                    },
+                },
             };
+
             return admin.messaging().send(message);
         });
 
         const fcmResults = await Promise.allSettled(fcmPromises);
         
-        // Salva notifica nel database
-        await queryPool.query(
+        // Log any failures
+        fcmResults.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                console.error(`Failed to send to token ${userTokens[index]?.fcm_token}:`, result.reason);
+            }
+        });
+
+        // Save notification to database using your Notifications table
+        await pool.query(
             `INSERT INTO Notifications 
             (targetRole, title, message, type, postId, isRead, createdAt, targetEmail, authorEmail) 
             VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
