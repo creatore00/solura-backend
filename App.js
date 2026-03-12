@@ -3871,32 +3871,30 @@ app.get("/notifications/unread-count", async (req, res) => {
   try {
     const pool = getPool(db);
     
-    // Costruisci le condizioni DINAMICAMENTE
-    let conditions = [];
+    // Costruisci le condizioni DINAMICAMENTE con un array
+    let conditions = ["isRead = 0"]; // Inizia con la condizione base
     let params = [];
-
-    // Condizione di base: non lette
-    conditions.push("isRead = 0");
 
     // Condizioni per ruolo O email (con logica CORRETTA)
     if (role && userEmail) {
       // Se abbiamo sia ruolo che email: (targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)
-      conditions.add("(targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)");
+      conditions.push("(targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)");
       params.push(role, userEmail);
     } else if (role) {
       // Solo ruolo
-      conditions.add("(targetRole = ? OR targetRole = 'ALL')");
+      conditions.push("(targetRole = ? OR targetRole = 'ALL')");
       params.push(role);
     } else if (userEmail) {
       // Solo email
-      conditions.add("targetEmail = ?");
+      conditions.push("targetEmail = ?");
       params.push(userEmail);
     }
 
     // Unisci tutte le condizioni con AND
     const query = `SELECT COUNT(*) as count FROM Notifications WHERE ${conditions.join(' AND ')}`;
 
-    console.log("🔍 Unread count query:", query, params); // Aggiungi log per debug
+    console.log("🔍 Unread count query:", query);
+    console.log("🔍 Unread count params:", params);
 
     const [result] = await pool.query(query, params);
 
@@ -3909,7 +3907,8 @@ app.get("/notifications/unread-count", async (req, res) => {
     console.error("Error fetching unread count:", err);
     res.status(500).json({ 
       success: false, 
-      message: "Server error fetching unread count" 
+      message: "Server error fetching unread count",
+      error: err.message 
     });
   }
 });
