@@ -2464,69 +2464,38 @@ app.post('/send-notification', async (req, res) => {
 });
 
 // Endpoint for Flutter app to register FCM tokens - FIXED VERSION
-app.post('/register-device', async (req, res) => {
-    try {
-        const { userId, email, fcmToken, deviceType, dbName } = req.body;
-
-        console.log('📱 Registering device:', { userId, email, dbName, deviceType });
-
-        // Validate required fields
-        if (!userId || !email || !fcmToken || !dbName) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Missing required fields (userId, email, fcmToken, dbName)' 
-            });
-        }
-
-        // Ottieni il pool per il database specifico dell'utente
-        const userPool = getPool(dbName);
-        
-        // First, check if user_devices table exists, if not create it
-        try {
-            await userPool.query(`
-                CREATE TABLE IF NOT EXISTS user_devices (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id INT NOT NULL,
-                    email VARCHAR(255) NOT NULL,
-                    fcm_token VARCHAR(255) NOT NULL,
-                    device_type VARCHAR(50) DEFAULT 'android',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    UNIQUE KEY unique_user_token (user_id, fcm_token),
-                    INDEX idx_email (email)
-                )
-            `);
-            console.log('✅ user_devices table checked/created');
-        } catch (tableError) {
-            console.error('❌ Error creating user_devices table:', tableError);
-        }
-
-        // Salva nella tabella user_devices del database specifico
-        const [result] = await userPool.query(
-            `INSERT INTO user_devices 
-            (user_id, email, fcm_token, device_type, updated_at) 
-            VALUES (?, ?, ?, ?, NOW()) 
-            ON DUPLICATE KEY UPDATE 
-            fcm_token = VALUES(fcm_token),
-            device_type = VALUES(device_type),
-            updated_at = NOW()`,
-            [userId, email, fcmToken, deviceType || 'android']
-        );
-
-        console.log(`✅ Device registered successfully for ${email} in ${dbName}`);
-        
-        res.json({ 
-            success: true, 
-            message: 'Device registered successfully',
-            deviceId: result.insertId
-        });
-    } catch (error) {
-        console.error('❌ Error registering device:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Error registering device: ' + error.message 
-        });
+app.post("/register-device", async (req, res) => {
+  const { userId, email, fcmToken, deviceType, dbName } = req.body;
+  
+  try {
+    const pool = getPool(dbName);
+    
+    // Check if token exists
+    const [existing] = await pool.query(
+      "SELECT id FROM UserDevices WHERE email = ? AND fcmToken = ?",
+      [email, fcmToken]
+    );
+    
+    if (existing.length > 0) {
+      // Update existing
+      await pool.query(
+        "UPDATE UserDevices SET updatedAt = NOW() WHERE id = ?",
+        [existing[0].id]
+      );
+    } else {
+      // Insert new
+      await pool.query(
+        `INSERT INTO UserDevices (email, userId, fcmToken, deviceType) 
+         VALUES (?, ?, ?, ?)`,
+        [email, userId, fcmToken, deviceType]
+      );
     }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error registering device:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
 // Switch database endpoint
@@ -3804,6 +3773,193 @@ app.post("/holidays/decide", async (req, res) => {
 });
 
 // ==================== NOTIFICATIONS ENDPOINTS ====================
+
+// Send notification to specific user (database only)
+app.post("/notifications/send", async (req, res) => {
+  const { db, targetEmail, title, message, type, postId } = req.body;
+
+  if (!db || !targetEmail || !title || !message) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Missing required fields" 
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    const [result] = await pool.query(
+      `INSERT INTO Notifications 
+       (targetEmail, targetRole, title, message, type, postId, isRead, createdAt) 
+       VALUES (?, 'USER', ?, ?, ?, ?, 0, NOW())`,
+      [targetEmail, title, message, type || 'info', postId || null]
+    );
+
+    res.json({ 
+      success: true, 
+      message: "Notification sent",
+      notificationId: result.insertId 
+    });
+
+  } catch (err) {
+    console.error("❌ Error sending notification:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Send notification to all users with a specific role
+app.post("/notifications/send-to-role", async (req, res) => {
+  const { db, targetRole, title, message, type, postId } = req.body;
+
+  if (!db || !targetRole || !title || !message) {
+    return res.status(400).json({ success: false, message: "Missing required fields" });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    const [result] = await pool.query(
+      `INSERT INTO Notifications 
+       (targetRole, title, message, type, postId, isRead, createdAt) 
+       VALUES (?, ?, ?, ?, ?, 0, NOW())`,
+      [targetRole, title, message, type || 'info', postId || null]
+    );
+
+    res.json({ 
+      success: true, 
+      message: `Notification sent to role: ${targetRole}`,
+      notificationId: result.insertId 
+    });
+
+  } catch (err) {
+    console.error("❌ Error sending notification to role:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Send notification with FCM push
+app.post("/notifications/send-push", async (req, res) => {
+  const { db, targetEmail, targetRole, title, message, type, postId } = req.body;
+
+  if (!db || !title || !message) {
+    return res.status(400).json({ success: false, message: "Missing required fields" });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    // 1. Insert into database
+    let notificationId;
+    if (targetEmail) {
+      const [result] = await pool.query(
+        `INSERT INTO Notifications 
+         (targetEmail, targetRole, title, message, type, postId, isRead, createdAt) 
+         VALUES (?, ?, ?, ?, ?, ?, 0, NOW())`,
+        [targetEmail, targetRole || 'USER', title, message, type || 'info', postId || null]
+      );
+      notificationId = result.insertId;
+    } else if (targetRole) {
+      const [result] = await pool.query(
+        `INSERT INTO Notifications 
+         (targetRole, title, message, type, postId, isRead, createdAt) 
+         VALUES (?, ?, ?, ?, ?, 0, NOW())`,
+        [targetRole, title, message, type || 'info', postId || null]
+      );
+      notificationId = result.insertId;
+    }
+
+    // 2. Get FCM tokens for target users
+    let tokens = [];
+    if (targetEmail) {
+      // Get token for specific user
+      const [rows] = await pool.query(
+        `SELECT fcmToken FROM UserDevices WHERE email = ?`,
+        [targetEmail]
+      );
+      tokens = rows.map(row => row.fcmToken).filter(t => t);
+    } else if (targetRole) {
+      // Get tokens for all users with this role
+      // You'll need a users table to map roles to emails
+      const [rows] = await pool.query(
+        `SELECT ud.fcmToken 
+         FROM UserDevices ud
+         JOIN Users u ON u.email = ud.email
+         WHERE u.role = ?`,
+        [targetRole]
+      );
+      tokens = rows.map(row => row.fcmToken).filter(t => t);
+    }
+
+    // 3. Send FCM push notifications
+    if (tokens.length > 0) {
+      const fcmPromises = tokens.map(token => 
+        sendFCMNotification(token, {
+          title,
+          body: message,
+          data: {
+            type: type || 'info',
+            notificationId: notificationId?.toString() || '',
+            postId: postId?.toString() || '',
+            click_action: 'FLUTTER_NOTIFICATION_CLICK',
+          }
+        })
+      );
+      
+      await Promise.allSettled(fcmPromises);
+    }
+
+    res.json({ 
+      success: true, 
+      message: "Push notification sent",
+      notificationId,
+      tokensSent: tokens.length 
+    });
+
+  } catch (err) {
+    console.error("❌ Error sending push notification:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Helper function to send FCM notification
+async function sendFCMNotification(token, { title, body, data }) {
+  const message = {
+    token: token,
+    notification: {
+      title: title,
+      body: body,
+    },
+    data: {
+      ...data,
+      title: title, // Include for data-only messages
+      body: body,
+    },
+    android: {
+      priority: 'high',
+      notification: {
+        channelId: 'high_importance_channel',
+        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+      },
+    },
+    apns: {
+      payload: {
+        aps: {
+          sound: 'default',
+          badge: 1,
+        },
+      },
+    },
+  };
+
+  try {
+    const response = await admin.messaging().send(message);
+    console.log('✅ FCM sent:', response);
+    return response;
+  } catch (error) {
+    console.error('❌ FCM error:', error);
+    throw error;
+  }
+}
 
 // Get notifications
 app.get("/notifications", async (req, res) => {
