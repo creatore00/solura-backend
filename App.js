@@ -3803,6 +3803,8 @@ app.post("/holidays/decide", async (req, res) => {
   }
 });
 
+// ==================== NOTIFICATIONS ENDPOINTS ====================
+
 // Get notifications
 app.get("/notifications", async (req, res) => {
   const { db, role, userEmail } = req.query;
@@ -3916,8 +3918,9 @@ app.post("/notifications/read", async (req, res) => {
   try {
     const pool = getPool(db);
 
+    // FIX: Add WHERE clause!
     await pool.query(
-      "UPDATE Notifications SET isRead = 1",
+      "UPDATE Notifications SET isRead = 1 WHERE id = ?",
       [id]
     );
 
@@ -3927,6 +3930,55 @@ app.post("/notifications/read", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Server error"
+    });
+  }
+});
+
+// Mark all notifications as read for a user
+app.post("/notifications/mark-all-read", async (req, res) => {
+  const { db, role, userEmail } = req.body;
+
+  if (!db) {
+    return res.status(400).json({
+      success: false,
+      message: "db is required"
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    let query = `
+      UPDATE Notifications 
+      SET isRead = 1 
+      WHERE isRead = 0
+    `;
+    const params = [];
+
+    if (role) {
+      query += ` AND (targetRole = ? OR targetRole = 'ALL')`;
+      params.push(role);
+    }
+    
+    if (userEmail) {
+      query += ` OR targetEmail = ?`;
+      params.push(userEmail);
+    }
+
+    const [result] = await pool.query(query, params);
+
+    res.json({ 
+      success: true, 
+      message: "All notifications marked as read",
+      markedCount: result.affectedRows 
+    });
+
+  } catch (err) {
+    console.error("Error marking all notifications as read:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error marking all as read",
+      error: err.message
     });
   }
 });
