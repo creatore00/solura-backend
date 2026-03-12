@@ -2493,8 +2493,10 @@ app.post("/register-device", async (req, res) => {
     
     // LOG 2: Controllo se token esiste
     console.log(`🔍 Cerco token esistente per email: ${email}`);
+    
+    // NOTA: user_id è il nome del campo, non userId
     const [existing] = await pool.query(
-      "SELECT id, createdAt, updatedAt FROM UserDevices WHERE email = ? AND fcmToken = ?",
+      "SELECT id, created_at, updated_at FROM user_devices WHERE email = ? AND fcm_token = ?",
       [email, fcmToken]
     );
     
@@ -2502,11 +2504,11 @@ app.post("/register-device", async (req, res) => {
       // 🟢 LOG 3: Token già esistente
       console.log("✅ TOKEN GIA' REGISTRATO - Aggiorno timestamp");
       console.log(`   ID dispositivo: ${existing[0].id}`);
-      console.log(`   Creato il: ${existing[0].createdAt}`);
-      console.log(`   Ultimo aggiornamento: ${existing[0].updatedAt}`);
+      console.log(`   Creato il: ${existing[0].created_at}`);
+      console.log(`   Ultimo aggiornamento: ${existing[0].updated_at}`);
       
       await pool.query(
-        "UPDATE UserDevices SET updatedAt = NOW() WHERE id = ?",
+        "UPDATE user_devices SET updated_at = NOW() WHERE id = ?",
         [existing[0].id]
       );
       
@@ -2515,10 +2517,11 @@ app.post("/register-device", async (req, res) => {
       // 🟢 LOG 4: Nuovo token
       console.log("🆕 NUOVO DISPOSITIVO - Creo nuova registrazione");
       
+      // NOTA: i nomi dei campi sono: user_id, email, fcm_token, device_type
       const [result] = await pool.query(
-        `INSERT INTO UserDevices (email, userId, fcmToken, deviceType) 
+        `INSERT INTO user_devices (user_id, email, fcm_token, device_type) 
          VALUES (?, ?, ?, ?)`,
-        [email, userId, fcmToken, deviceType]
+        [userId, email, fcmToken, deviceType]
       );
       
       console.log(`✅ Nuovo dispositivo registrato con ID: ${result.insertId}`);
@@ -2526,19 +2529,19 @@ app.post("/register-device", async (req, res) => {
     
     // LOG 5: Verifica quanti dispositivi ha l'utente
     const [count] = await pool.query(
-      "SELECT COUNT(*) as total FROM UserDevices WHERE email = ?",
+      "SELECT COUNT(*) as total FROM user_devices WHERE email = ?",
       [email]
     );
     console.log(`📊 Totale dispositivi registrati per ${email}: ${count[0].total}`);
     
     // LOG 6: Lista di tutti i dispositivi dell'utente
     const [devices] = await pool.query(
-      "SELECT id, deviceType, updatedAt FROM UserDevices WHERE email = ? ORDER BY updatedAt DESC",
+      "SELECT id, device_type, updated_at FROM user_devices WHERE email = ? ORDER BY updated_at DESC",
       [email]
     );
     console.log("📱 Dispositivi attivi:");
     devices.forEach((d, index) => {
-      console.log(`   ${index + 1}. ID: ${d.id} | Tipo: ${d.deviceType || 'sconosciuto'} | Ultimo accesso: ${d.updatedAt}`);
+      console.log(`   ${index + 1}. ID: ${d.id} | Tipo: ${d.device_type || 'sconosciuto'} | Ultimo accesso: ${d.updated_at}`);
     });
     
     console.log("=================================");
