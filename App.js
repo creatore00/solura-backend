@@ -4058,18 +4058,25 @@ app.get("/notifications", async (req, res) => {
     `;
     const params = [];
 
-    // Filtra per ruolo O email specifica
-    if (role) {
+    // ✅ CORREZIONE: Raggruppa le condizioni con le parentesi
+    if (role && userEmail) {
+      // Se abbiamo sia ruolo che email: (targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)
+      query += ` AND (targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)`;
+      params.push(role, userEmail);
+    } else if (role) {
+      // Solo ruolo
       query += ` AND (targetRole = ? OR targetRole = 'ALL')`;
       params.push(role);
-    }
-    
-    if (userEmail) {
-      query += ` OR targetEmail = ?`;
+    } else if (userEmail) {
+      // Solo email
+      query += ` AND targetEmail = ?`;
       params.push(userEmail);
     }
 
     query += ` ORDER BY id DESC LIMIT 50`;
+
+    console.log("🔍 Notifications query:", query);
+    console.log("🔍 Notifications params:", params);
 
     const [rows] = await pool.query(query, params);
 
@@ -4078,6 +4085,8 @@ app.get("/notifications", async (req, res) => {
       ...row,
       createdAt: row.createdAt ? row.createdAt.toISOString() : null
     }));
+
+    console.log(`📊 Trovate ${notifications.length} notifiche`);
 
     res.json({ 
       success: true, 
@@ -4105,27 +4114,20 @@ app.get("/notifications/unread-count", async (req, res) => {
   try {
     const pool = getPool(db);
     
-    // Costruisci le condizioni DINAMICAMENTE con un array
-    let conditions = ["isRead = 0"]; // Inizia con la condizione base
+    let query = `SELECT COUNT(*) as count FROM Notifications WHERE isRead = 0`;
     let params = [];
 
-    // Condizioni per ruolo O email (con logica CORRETTA)
+    // ✅ CORREZIONE: Stessa logica delle notifiche
     if (role && userEmail) {
-      // Se abbiamo sia ruolo che email: (targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)
-      conditions.push("(targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)");
+      query += ` AND (targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)`;
       params.push(role, userEmail);
     } else if (role) {
-      // Solo ruolo
-      conditions.push("(targetRole = ? OR targetRole = 'ALL')");
+      query += ` AND (targetRole = ? OR targetRole = 'ALL')`;
       params.push(role);
     } else if (userEmail) {
-      // Solo email
-      conditions.push("targetEmail = ?");
+      query += ` AND targetEmail = ?`;
       params.push(userEmail);
     }
-
-    // Unisci tutte le condizioni con AND
-    const query = `SELECT COUNT(*) as count FROM Notifications WHERE ${conditions.join(' AND ')}`;
 
     console.log("🔍 Unread count query:", query);
     console.log("🔍 Unread count params:", params);
