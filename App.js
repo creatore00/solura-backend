@@ -3938,43 +3938,62 @@ app.post("/notifications/read", async (req, res) => {
   }
 });
 
-// Mark all notifications as read for a user
+// Mark all notifications as read - VERSIONE CORRETTA (con gestione NULL)
 app.post("/notifications/mark-all-read", async (req, res) => {
   const { db, role, userEmail } = req.body;
 
   if (!db) {
-    return res.status(400).json({ success: false, message: "db è obbligatorio" });
+    return res.status(400).json({
+      success: false,
+      message: "db is required"
+    });
   }
 
   try {
     const pool = getPool(db);
+    
+    console.log(`📝 Marking all as read for role: ${role}, email: ${userEmail}`);
+    
+    // Costruisci le condizioni per selezionare le notifiche DA AGGIORNARE
+    let conditions = ["isRead = 0"]; // Solo notifiche non lette
+    let params = [];
 
-    let query = `UPDATE Notifications SET isRead = 1 WHERE isRead = 0`;
-    const params = [];
-
-    // Filtra per ruolo O email, proprio come nella fetch
-    if (role) {
-      query += ` AND (targetRole = ? OR targetRole = 'ALL')`;
+    // Condizioni per ruolo O email (con gestione CORRETTA di NULL)
+    if (role && userEmail) {
+      // Gestione speciale per targetEmail NULL
+      conditions.push("(targetRole = ? OR targetRole = 'ALL' OR (targetEmail = ? OR targetEmail IS NULL))");
+      params.push(role, userEmail);
+    } else if (role) {
+      conditions.push("(targetRole = ? OR targetRole = 'ALL')");
       params.push(role);
-    }
-    if (userEmail) {
-      query += ` AND targetEmail = ?`; // Assumendo che sia per un'email specifica
+    } else if (userEmail) {
+      conditions.push("(targetEmail = ? OR targetEmail IS NULL)");
       params.push(userEmail);
     }
 
+    // Crea la query UPDATE con le condizioni
+    const query = `UPDATE Notifications SET isRead = 1 WHERE ${conditions.join(' AND ')}`;
+    
+    console.log("🔍 Mark all query:", query);
+    console.log("🔍 Mark all params:", params);
+
     const [result] = await pool.query(query, params);
 
-    console.log(`✅ Segnate tutte come lette per ${userEmail || role}. Righe aggiornate: ${result.affectedRows}`);
+    console.log(`✅ Marked ${result.affectedRows} notifications as read`);
 
-    res.json({
-      success: true,
-      message: "Tutte le notifiche segnate come lette",
-      markedCount: result.affectedRows
+    res.json({ 
+      success: true, 
+      message: "All notifications marked as read",
+      markedCount: result.affectedRows 
     });
 
   } catch (err) {
-    console.error("❌ Errore nel segnare tutte come lette:", err);
-    res.status(500).json({ success: false, message: "Errore server" });
+    console.error("❌ Error marking all notifications as read:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error marking all as read",
+      error: err.message
+    });
   }
 });
 
