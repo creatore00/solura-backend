@@ -3917,7 +3917,7 @@ app.post("/notifications/read", async (req, res) => {
     const pool = getPool(db);
 
     await pool.query(
-      "UPDATE Notifications SET isRead = 1 WHERE id = ?",
+      "UPDATE Notifications SET isRead = 1",
       [id]
     );
 
