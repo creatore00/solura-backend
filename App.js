@@ -2387,94 +2387,6 @@ app.post("/login", async (req, res) => {
   }
 });
 
-app.post('/send-notification', async (req, res) => {
-    try {
-        const { userId, email, name, title, body, data, dbName } = req.body;
-
-        if (!dbName) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Database name is required' 
-            });
-        }
-
-        // Ottieni il pool per il database specifico
-        const userPool = getPool(dbName);
-        const queryPool = userPool.promise ? userPool.promise() : userPool;
-
-        // Cerca i token nella tabella user_devices del database specifico
-        const [userTokens] = await queryPool.query(
-            `SELECT fcm_token, device_type 
-             FROM user_devices 
-             WHERE email = ?`,
-            [email]
-        );
-
-        if (userTokens.length === 0) {
-            return res.status(404).json({ 
-                success: false, 
-                message: 'No device tokens found for user' 
-            });
-        }
-
-        // Send push notifications using FCM
-        const fcmPromises = userTokens.map(async (device) => {
-            const message = {
-                token: device.fcm_token,
-                notification: { title, body },
-                data: {
-                    type: data.type,
-                    notificationSubtype: data.notificationSubtype,
-                    timestamp: data.timestamp,
-                    weekStart: data.weekStart || '',
-                    weekEnd: data.weekEnd || '',
-                    action: data.action || 'view_rota',
-                    click_action: 'FLUTTER_NOTIFICATION_CLICK',
-                },
-                android: {
-                    priority: 'high',
-                    notification: {
-                        sound: 'default',
-                        channelId: 'rota_notifications'
-                    }
-                }
-            };
-            return admin.messaging().send(message);
-        });
-
-        const fcmResults = await Promise.allSettled(fcmPromises);
-        
-        // Salva la notifica nel database specifico
-        await queryPool.query(
-            `INSERT INTO Notifications 
-            (targetRole, title, message, type, postId, isRead, createdAt, targetEmail, authorEmail) 
-            VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
-            [
-                data.role || 'EMPLOYEE',
-                title,
-                body,
-                'SYSTEM',
-                data.postId || null,
-                0,
-                email,
-                'system@solura.com'
-            ]
-        );
-
-        res.json({ 
-            success: true, 
-            message: 'Notification sent successfully',
-            deliveredCount: fcmResults.filter(r => r.status === 'fulfilled').length
-        });
-    } catch (error) {
-        console.error('Error sending notification:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Error sending notification: ' + error.message 
-        });
-    }
-});
-
 // Endpoint for Flutter app to register FCM tokens - FIXED VERSION
 app.post("/register-device", async (req, res) => {
   const { userId, email, fcmToken, deviceType, dbName } = req.body;
@@ -3851,6 +3763,154 @@ app.post("/holidays/decide", async (req, res) => {
 });
 
 // ==================== NOTIFICATIONS ENDPOINTS ====================
+
+app.post('/send-notification', async (req, res) => {
+    try {
+        const { userId, email, name, title, body, data, dbName } = req.body;
+
+        console.log("=================================");
+        console.log("📱 INVIO NOTIFICA PUSH");
+        console.log("=================================");
+        console.log(`📧 Email: ${email}`);
+        console.log(`📝 Title: ${title}`);
+        console.log(`💬 Body: ${body}`);
+        console.log(`💾 Database: ${dbName}`);
+        console.log(`📊 Data:`, data);
+        console.log("=================================");
+
+        if (!dbName) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Database name is required' 
+            });
+        }
+
+        // Ottieni il pool per il database specifico
+        const userPool = getPool(dbName);
+        const queryPool = userPool.promise ? userPool.promise() : userPool;
+
+        // LOG: Cerca i token
+        console.log(`🔍 Cerco token per email: ${email}`);
+        const [userTokens] = await queryPool.query(
+            `SELECT fcm_token, device_type 
+             FROM user_devices 
+             WHERE email = ?`,
+            [email]
+        );
+
+        console.log(`📊 Trovati ${userTokens.length} dispositivi:`);
+        userTokens.forEach((t, i) => {
+            console.log(`   ${i+1}. Tipo: ${t.device_type} | Token: ${t.fcm_token ? t.fcm_token.substring(0, 20) + '...' : 'MANCANTE'}`);
+        });
+
+        if (userTokens.length === 0) {
+            console.log("❌ Nessun dispositivo trovato!");
+            return res.status(404).json({ 
+                success: false, 
+                message: 'No device tokens found for user' 
+            });
+        }
+
+        // Invia notifiche push
+        console.log("📱 Invio notifiche FCM...");
+        const fcmPromises = userTokens.map(async (device, index) => {
+            if (!device.fcm_token) {
+                console.log(`   ⚠️ Dispositivo ${index+1}: token mancante, salto...`);
+                return Promise.reject(new Error('Token mancante'));
+            }
+
+            const message = {
+                token: device.fcm_token,
+                notification: { 
+                    title, 
+                    body 
+                },
+                data: {
+                    type: data.type,
+                    notificationSubtype: data.notificationSubtype,
+                    timestamp: data.timestamp,
+                    weekStart: data.weekStart || '',
+                    weekEnd: data.weekEnd || '',
+                    action: data.action || 'view_rota',
+                    click_action: 'FLUTTER_NOTIFICATION_CLICK',
+                },
+                android: {
+                    priority: 'high',
+                    notification: {
+                        sound: 'default',
+                        channelId: 'rota_notifications',
+                        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+                    },
+                },
+                apns: {
+                    payload: {
+                        aps: {
+                            sound: 'default',
+                            badge: 1,
+                        },
+                    },
+                },
+            };
+
+            console.log(`   📤 Invio a dispositivo ${index+1} (${device.device_type})...`);
+            console.log(`      Token: ${device.fcm_token.substring(0, 30)}...`);
+            
+            try {
+                const response = await admin.messaging().send(message);
+                console.log(`   ✅ Successo! Response:`, response);
+                return response;
+            } catch (err) {
+                console.log(`   ❌ Errore:`, err.message);
+                if (err.code === 'messaging/registration-token-not-registered') {
+                    // Token non valido, rimuovilo
+                    await queryPool.query(
+                        "DELETE FROM user_devices WHERE fcm_token = ?",
+                        [device.fcm_token]
+                    );
+                    console.log(`   🗑️ Token rimosso dal database`);
+                }
+                throw err;
+            }
+        });
+
+        const fcmResults = await Promise.allSettled(fcmPromises);
+        
+        const successCount = fcmResults.filter(r => r.status === 'fulfilled').length;
+        console.log(`📊 Risultati: ${successCount}/${userTokens.length} notifiche inviate con successo`);
+
+        // Salva la notifica nel database
+        const [insertResult] = await queryPool.query(
+            `INSERT INTO Notifications 
+            (targetRole, title, message, type, postId, isRead, createdAt, targetEmail, authorEmail) 
+            VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
+            [
+                data.role || 'EMPLOYEE',
+                title,
+                body,
+                'SYSTEM',
+                data.postId || null,
+                0,
+                email,
+                'system@solura.com'
+            ]
+        );
+
+        console.log(`✅ Notifica salvata in DB con ID: ${insertResult.insertId}`);
+
+        res.json({ 
+            success: true, 
+            message: 'Notification sent successfully',
+            deliveredCount: successCount,
+            totalDevices: userTokens.length
+        });
+    } catch (error) {
+        console.error('❌ ERRORE GENERALE:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error sending notification: ' + error.message 
+        });
+    }
+});
 
 // Send notification to specific user (database only)
 app.post("/notifications/send", async (req, res) => {
