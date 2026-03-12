@@ -3860,7 +3860,7 @@ app.get("/notifications", async (req, res) => {
   }
 });
 
-// Get unread count
+// Get unread count - VERSIONE CORRETTA
 app.get("/notifications/unread-count", async (req, res) => {
   const { db, role, userEmail } = req.query;
 
@@ -3871,22 +3871,32 @@ app.get("/notifications/unread-count", async (req, res) => {
   try {
     const pool = getPool(db);
     
-    let query = `
-      SELECT COUNT(*) as count 
-      FROM Notifications 
-      WHERE isRead = 0
-    `;
-    const params = [];
+    // Costruisci le condizioni DINAMICAMENTE
+    let conditions = [];
+    let params = [];
 
-    if (role) {
-      query += ` AND (targetRole = ? OR targetRole = 'ALL')`;
+    // Condizione di base: non lette
+    conditions.push("isRead = 0");
+
+    // Condizioni per ruolo O email (con logica CORRETTA)
+    if (role && userEmail) {
+      // Se abbiamo sia ruolo che email: (targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)
+      conditions.add("(targetRole = ? OR targetRole = 'ALL' OR targetEmail = ?)");
+      params.push(role, userEmail);
+    } else if (role) {
+      // Solo ruolo
+      conditions.add("(targetRole = ? OR targetRole = 'ALL')");
       params.push(role);
-    }
-    
-    if (userEmail) {
-      query += ` OR targetEmail = ?`;
+    } else if (userEmail) {
+      // Solo email
+      conditions.add("targetEmail = ?");
       params.push(userEmail);
     }
+
+    // Unisci tutte le condizioni con AND
+    const query = `SELECT COUNT(*) as count FROM Notifications WHERE ${conditions.join(' AND ')}`;
+
+    console.log("🔍 Unread count query:", query, params); // Aggiungi log per debug
 
     const [result] = await pool.query(query, params);
 
