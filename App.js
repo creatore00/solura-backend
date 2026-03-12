@@ -2347,7 +2347,7 @@ app.post("/login", async (req, res) => {
   try {
     const trimmedEmail = email.trim();
     const [rows] = await pool.query(
-      "SELECT Email, Password, Access, db_name FROM users WHERE Email = ?",
+      "SELECT id, Email, Password, Access, db_name FROM users WHERE Email = ?", // ← AGGIUNTO id
       [trimmedEmail]
     );
 
@@ -2356,19 +2356,31 @@ app.post("/login", async (req, res) => {
 
     const databases = [];
     let loginSuccess = false;
+    let userId = null; // ← Variabile per salvare userId
 
     for (const row of rows) {
       const match = await bcrypt.compare(password, row.Password);
       if (match) {
         loginSuccess = true;
         databases.push({ db_name: row.db_name, access: row.Access });
+        userId = row.id; // ← Prendi l'id del primo record valido
       }
     }
 
     if (!loginSuccess) return res.json({ success: false, message: "Invalid email or password" });
     if (databases.length === 0) return res.json({ success: false, message: "No databases available" });
 
-    return res.json({ success: true, message: "Login successful", email: trimmedEmail, databases });
+    // LOG per debug
+    console.log(`✅ Login successful for ${trimmedEmail} (userId: ${userId})`);
+    console.log(`📚 Databases: ${JSON.stringify(databases)}`);
+
+    return res.json({ 
+      success: true, 
+      message: "Login successful", 
+      email: trimmedEmail, 
+      userId: userId, // ← AGGIUNTO userId
+      databases 
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, message: "Server error" });
