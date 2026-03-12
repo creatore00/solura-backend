@@ -2467,34 +2467,97 @@ app.post('/send-notification', async (req, res) => {
 app.post("/register-device", async (req, res) => {
   const { userId, email, fcmToken, deviceType, dbName } = req.body;
   
+  // 🟢 LOG 1: Ricevuta richiesta
+  console.log("=================================");
+  console.log("📱 REGISTER-DEVICE RICHIESTA RICEVUTA");
+  console.log("=================================");
+  console.log(`📧 Email: ${email}`);
+  console.log(`🆔 UserId: ${userId}`);
+  console.log(`📱 Device Type: ${deviceType}`);
+  console.log(`💾 Database: ${dbName}`);
+  console.log(`🔑 FCM Token: ${fcmToken ? fcmToken.substring(0, 20) + '...' : 'MANCANTE'}`);
+  console.log("=================================");
+  
+  // Validazione input
+  if (!email || !fcmToken || !dbName) {
+    console.log("❌ ERRORE: Dati mancanti!", { email, fcmToken: !!fcmToken, dbName });
+    return res.status(400).json({ 
+      success: false, 
+      message: "Missing required fields" 
+    });
+  }
+  
   try {
     const pool = getPool(dbName);
+    console.log(`🔌 Connesso al database: ${dbName}`);
     
-    // Check if token exists
+    // LOG 2: Controllo se token esiste
+    console.log(`🔍 Cerco token esistente per email: ${email}`);
     const [existing] = await pool.query(
-      "SELECT id FROM UserDevices WHERE email = ? AND fcmToken = ?",
+      "SELECT id, createdAt, updatedAt FROM UserDevices WHERE email = ? AND fcmToken = ?",
       [email, fcmToken]
     );
     
     if (existing.length > 0) {
-      // Update existing
+      // 🟢 LOG 3: Token già esistente
+      console.log("✅ TOKEN GIA' REGISTRATO - Aggiorno timestamp");
+      console.log(`   ID dispositivo: ${existing[0].id}`);
+      console.log(`   Creato il: ${existing[0].createdAt}`);
+      console.log(`   Ultimo aggiornamento: ${existing[0].updatedAt}`);
+      
       await pool.query(
         "UPDATE UserDevices SET updatedAt = NOW() WHERE id = ?",
         [existing[0].id]
       );
+      
+      console.log(`✅ Dispositivo aggiornato con successo (ID: ${existing[0].id})`);
     } else {
-      // Insert new
-      await pool.query(
+      // 🟢 LOG 4: Nuovo token
+      console.log("🆕 NUOVO DISPOSITIVO - Creo nuova registrazione");
+      
+      const [result] = await pool.query(
         `INSERT INTO UserDevices (email, userId, fcmToken, deviceType) 
          VALUES (?, ?, ?, ?)`,
         [email, userId, fcmToken, deviceType]
       );
+      
+      console.log(`✅ Nuovo dispositivo registrato con ID: ${result.insertId}`);
     }
     
+    // LOG 5: Verifica quanti dispositivi ha l'utente
+    const [count] = await pool.query(
+      "SELECT COUNT(*) as total FROM UserDevices WHERE email = ?",
+      [email]
+    );
+    console.log(`📊 Totale dispositivi registrati per ${email}: ${count[0].total}`);
+    
+    // LOG 6: Lista di tutti i dispositivi dell'utente
+    const [devices] = await pool.query(
+      "SELECT id, deviceType, updatedAt FROM UserDevices WHERE email = ? ORDER BY updatedAt DESC",
+      [email]
+    );
+    console.log("📱 Dispositivi attivi:");
+    devices.forEach((d, index) => {
+      console.log(`   ${index + 1}. ID: ${d.id} | Tipo: ${d.deviceType || 'sconosciuto'} | Ultimo accesso: ${d.updatedAt}`);
+    });
+    
+    console.log("=================================");
+    console.log("✅ REGISTRAZIONE COMPLETATA CON SUCCESSO");
+    console.log("=================================");
+    
     res.json({ success: true });
+    
   } catch (err) {
-    console.error("Error registering device:", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    console.log("=================================");
+    console.log("❌ ERRORE DURANTE LA REGISTRAZIONE");
+    console.log("=================================");
+    console.error("Errore:", err);
+    console.log("=================================");
+    
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error" 
+    });
   }
 });
 
