@@ -4075,8 +4075,22 @@ app.post("/notifications/send-to-role", async (req, res) => {
 app.post("/notifications/send-push", async (req, res) => {
   const { db, targetEmail, targetRole, title, message, type, postId } = req.body;
 
+  console.log("=================================");
+  console.log("📱 SEND PUSH NOTIFICATION");
+  console.log("=================================");
+  console.log("db:", db);
+  console.log("targetEmail:", targetEmail);
+  console.log("targetRole:", targetRole);
+  console.log("title:", title);
+  console.log("message:", message);
+  console.log("type:", type);
+  console.log("=================================");
+
   if (!db || !title || !message) {
-    return res.status(400).json({ success: false, message: "Missing required fields" });
+    return res.status(400).json({ 
+      success: false, 
+      message: "Missing required fields" 
+    });
   }
 
   try {
@@ -4087,71 +4101,132 @@ app.post("/notifications/send-push", async (req, res) => {
     if (targetEmail) {
       const [result] = await pool.query(
         `INSERT INTO Notifications 
-         (targetEmail, targetRole, title, message, type, postId, isRead, createdAt) 
-         VALUES (?, ?, ?, ?, ?, ?, 0, NOW())`,
-        [targetEmail, targetRole || 'USER', title, message, type || 'info', postId || null]
+         (targetEmail, targetRole, title, message, type, postId, isRead, createdAt, authorEmail) 
+         VALUES (?, ?, ?, ?, ?, ?, 0, NOW(), ?)`,
+        [targetEmail, targetRole || 'USER', title, message, type || 'info', postId || null, 'system@solura.com']
       );
       notificationId = result.insertId;
+      console.log(`✅ Notification saved in DB with ID: ${notificationId} for email: ${targetEmail}`);
     } else if (targetRole) {
       const [result] = await pool.query(
         `INSERT INTO Notifications 
-         (targetRole, title, message, type, postId, isRead, createdAt) 
-         VALUES (?, ?, ?, ?, ?, 0, NOW())`,
-        [targetRole, title, message, type || 'info', postId || null]
+         (targetRole, title, message, type, postId, isRead, createdAt, authorEmail) 
+         VALUES (?, ?, ?, ?, ?, 0, NOW(), ?)`,
+        [targetRole, title, message, type || 'info', postId || null, 'system@solura.com']
       );
       notificationId = result.insertId;
+      console.log(`✅ Notification saved in DB with ID: ${notificationId} for role: ${targetRole}`);
     }
 
-    // 2. Get FCM tokens for target users
+    // 2. Get FCM tokens for target users - MODIFICATO PER user_devices
     let tokens = [];
+    
     if (targetEmail) {
-      // Get token for specific user
+      // Get token for specific user - usando i nomi corretti della tabella
+      console.log(`🔍 Looking for devices with email: ${targetEmail}`);
       const [rows] = await pool.query(
-        `SELECT fcmToken FROM UserDevices WHERE email = ?`,
+        `SELECT fcm_token, device_type FROM user_devices WHERE email = ?`,
         [targetEmail]
       );
-      tokens = rows.map(row => row.fcmToken).filter(t => t);
+      
+      console.log(`📊 Found ${rows.length} devices for ${targetEmail}`);
+      rows.forEach((row, i) => {
+        console.log(`   Device ${i+1}: type=${row.device_type}, token=${row.fcm_token ? row.fcm_token.substring(0, 20) + '...' : 'NO TOKEN'}`);
+      });
+      
+      tokens = rows.map(row => row.fcm_token).filter(t => t && t.length > 0);
+      
     } else if (targetRole) {
       // Get tokens for all users with this role
-      // You'll need a users table to map roles to emails
-      const [rows] = await pool.query(
-        `SELECT ud.fcmToken 
-         FROM UserDevices ud
-         JOIN Users u ON u.email = ud.email
-         WHERE u.role = ?`,
-        [targetRole]
+      // Devi avere una tabella users che mappa email a ruoli
+      console.log(`🔍 Looking for devices for role: ${targetRole}`);
+      
+      // Prima trova tutte le email con quel ruolo
+      const [userRows] = await pool.query(
+        `SELECT email FROM users WHERE role = ? OR access = ?`,
+        [targetRole, targetRole]
       );
-      tokens = rows.map(row => row.fcmToken).filter(t => t);
+      
+      console.log(`📊 Found ${userRows.length} users with role ${targetRole}`);
+      
+      if (userRows.length > 0) {
+        const emails = userRows.map(u => u.email);
+        
+        // Poi trova i dispositivi per queste email
+        const [deviceRows] = await pool.query(
+          `SELECT fcm_token, device_type, email FROM user_devices WHERE email IN (?)`,
+          [emails]
+        );
+        
+        console.log(`📊 Found ${deviceRows.length} devices for these users`);
+        deviceRows.forEach((row, i) => {
+          console.log(`   Device ${i+1}: email=${row.email}, type=${row.device_type}, token=${row.fcm_token ? row.fcm_token.substring(0, 20) + '...' : 'NO TOKEN'}`);
+        });
+        
+        tokens = deviceRows.map(row => row.fcm_token).filter(t => t && t.length > 0);
+      }
     }
+
+    console.log(`📱 Total valid tokens to send: ${tokens.length}`);
 
     // 3. Send FCM push notifications
     if (tokens.length > 0) {
-      const fcmPromises = tokens.map(token => 
-        sendFCMNotification(token, {
-          title,
-          body: message,
-          data: {
-            type: type || 'info',
-            notificationId: notificationId?.toString() || '',
-            postId: postId?.toString() || '',
-            click_action: 'FLUTTER_NOTIFICATION_CLICK',
-          }
-        })
-      );
+      console.log(`📤 Sending push notifications to ${tokens.length} devices...`);
       
-      await Promise.allSettled(fcmPromises);
+      const fcmResults = [];
+      
+      for (const token of tokens) {
+        try {
+          const result = await sendFCMNotification(token, {
+            title,
+            body: message,
+            data: {
+              type: type || 'info',
+              notificationId: notificationId?.toString() || '',
+              postId: postId?.toString() || '',
+              click_action: 'FLUTTER_NOTIFICATION_CLICK',
+            }
+          });
+          
+          console.log(`✅ FCM sent to ${token.substring(0, 20)}...`);
+          fcmResults.push({ token: token.substring(0, 20) + '...', success: true });
+          
+        } catch (error) {
+          console.error(`❌ FCM error for token ${token.substring(0, 20)}...:`, error.message);
+          fcmResults.push({ token: token.substring(0, 20) + '...', success: false, error: error.message });
+          
+          // Se il token non è più valido, rimuovilo dal database
+          if (error.code === 'messaging/registration-token-not-registered') {
+            console.log(`   🗑️ Removing invalid token from database`);
+            await pool.query(
+              "DELETE FROM user_devices WHERE fcm_token = ?",
+              [token]
+            );
+          }
+        }
+      }
+      
+      console.log("📊 FCM Results:", fcmResults);
+      
+    } else {
+      console.log("⚠️ No valid tokens found to send notifications");
     }
 
     res.json({ 
       success: true, 
-      message: "Push notification sent",
+      message: "Push notification processed",
       notificationId,
+      tokensFound: tokens.length,
       tokensSent: tokens.length 
     });
 
   } catch (err) {
     console.error("❌ Error sending push notification:", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error",
+      error: err.message 
+    });
   }
 });
 
