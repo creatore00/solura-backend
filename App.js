@@ -532,6 +532,81 @@ app.get("/rota/employees", async (req, res) => {
   }
 });
 
+// ENDPOINT: Aggiungi turno direttamente in rota
+app.post("/rota/add-direct", async (req, res) => {
+  try {
+    const { 
+      db, 
+      userEmail, 
+      dayLabel,  // Questo dovrebbe già arrivare nel formato corretto
+      dayDate, 
+      startTime, 
+      endTime, 
+      employeeEmail,
+      employeeName,
+      employeeLastName,
+      employeeDesignation 
+    } = req.body;
+
+    console.log("=================================");
+    console.log("📝 ADD TO ROTA DIRECTLY");
+    console.log("=================================");
+    console.log("db:", db);
+    console.log("userEmail:", userEmail);
+    console.log("dayLabel:", dayLabel); // Es: "13/03/2026 (Friday)"
+    console.log("dayDate:", dayDate);    // Es: "2026-03-13"
+    console.log("startTime:", startTime);
+    console.log("endTime:", endTime);
+    console.log("employeeEmail:", employeeEmail);
+    console.log("=================================");
+
+    if (!db || !dayLabel || !startTime || !endTime || !employeeEmail) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Missing required fields" 
+      });
+    }
+
+    const pool = getPool(db);
+    
+    // Genera un ID univoco per il turno
+    const shiftId = Math.floor(1000000000000000 + Math.random() * 9000000000000000).toString();
+    
+    // Inserisci nella tabella rota - usa dayLabel che ha già il formato corretto
+    const [result] = await pool.query(
+      `INSERT INTO rota 
+       (id, name, lastName, day, startTime, endTime, designation) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        shiftId,
+        employeeName,
+        employeeLastName,
+        dayLabel,  // Già nel formato "dd/mm/yyyy (Monday)"
+        startTime,
+        endTime,
+        employeeDesignation
+      ]
+    );
+
+    console.log(`✅ Shift added to rota with ID: ${shiftId}`);
+    console.log(`✅ Day format: ${dayLabel}`);
+
+    res.json({ 
+      success: true, 
+      message: "Shift added to rota successfully",
+      shiftId: shiftId 
+    });
+
+  } catch (err) {
+    console.error("❌ Error adding to rota:", err);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error",
+      error: err.message 
+    });
+  }
+});
+
 // ==================== FEED ENDPOINTS ====================
 
 // Create a new feed post
