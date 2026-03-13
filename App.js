@@ -511,6 +511,27 @@ app.get("/rota/my-day", async (req, res) => {
   }
 });
 
+// Get all employees
+app.get("/rota/employees", async (req, res) => {
+  const { db } = req.query;
+  
+  if (!db) {
+    return res.status(400).json({ success: false, message: "db required" });
+  }
+  
+  try {
+    const pool = getPool(db);
+    const [rows] = await pool.query(
+      "SELECT id, name, lastName, email, designation FROM Employees ORDER BY name"
+    );
+    
+    res.json({ success: true, employees: rows });
+  } catch (err) {
+    console.error("Error fetching employees:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // ==================== FEED ENDPOINTS ====================
 
 // Create a new feed post
