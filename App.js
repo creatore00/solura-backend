@@ -4059,6 +4059,75 @@ app.post("/notifications/send-push", async (req, res) => {
   }
 });
 
+// ENDPOINT DI TEST SEMPLICE
+app.post("/test-notifications/simple", async (req, res) => {
+  const { db, email } = req.body;
+  
+  console.log("📱 TEST NOTIFICATION REQUEST");
+  console.log(`Email: ${email}, DB: ${db}`);
+
+  try {
+    const pool = getPool(db);
+    
+    // 1. SALVA NEL DATABASE
+    const [result] = await pool.query(
+      `INSERT INTO Notifications 
+       (targetEmail, title, message, type, isRead, createdAt, authorEmail) 
+       VALUES (?, ?, ?, ?, 0, NOW(), ?)`,
+      [email, '🔔 Test Notifica', 'Questa è una notifica di test', 'SYSTEM', 'system@solura.com']
+    );
+
+    // 2. CERCA I TOKEN FCM
+    const [devices] = await pool.query(
+      "SELECT fcm_token FROM user_devices WHERE email = ?",
+      [email]
+    );
+
+    console.log(`Trovati ${devices.length} dispositivi`);
+
+    // 3. INVIA NOTIFICHE PUSH
+    let sentCount = 0;
+    for (const device of devices) {
+      if (!device.fcm_token) continue;
+
+      const message = {
+        token: device.fcm_token,
+        notification: {
+          title: '🔔 Test',
+          body: 'Notifica di test',
+        },
+        data: {
+          type: 'SYSTEM',
+          click_action: 'FLUTTER_NOTIFICATION_CLICK',
+        },
+        android: {
+          priority: 'high',
+          notification: {
+            channelId: 'rota_notifications',
+          },
+        },
+      };
+
+      try {
+        await admin.messaging().send(message);
+        sentCount++;
+      } catch (e) {
+        console.error(`Errore invio: ${e.message}`);
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Test notification sent',
+      deliveredCount: sentCount
+    });
+
+  } catch (error) {
+    console.error('❌ Errore:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Helper function to send FCM notification
 async function sendFCMNotification(token, { title, body, data }) {
   const message = {
