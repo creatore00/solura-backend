@@ -4118,11 +4118,23 @@ app.post("/notifications/send-push", async (req, res) => {
       console.log(`✅ Notification saved in DB with ID: ${notificationId} for role: ${targetRole}`);
     }
 
-    // 2. Get FCM tokens for target users - MODIFICATO PER user_devices
+    // 2. Get FCM tokens for target users
     let tokens = [];
     
-    if (targetEmail) {
-      // Get token for specific user - usando i nomi corretti della tabella
+    // 🔥 CASO SPECIALE: INVIO A TUTTI
+    if (targetRole === 'ALL') {
+      console.log('🔍 Sending notification to ALL devices');
+      const [allDevices] = await pool.query(
+        `SELECT fcm_token, device_type, email FROM user_devices WHERE fcm_token IS NOT NULL AND fcm_token != ''`
+      );
+      console.log(`📊 Found ${allDevices.length} total devices`);
+      allDevices.forEach((row, i) => {
+        console.log(`   Device ${i+1}: email=${row.email}, type=${row.device_type}, token=${row.fcm_token ? row.fcm_token.substring(0, 20) + '...' : 'NO TOKEN'}`);
+      });
+      tokens = allDevices.map(row => row.fcm_token).filter(t => t && t.length > 0);
+      
+    } else if (targetEmail) {
+      // Get token for specific user
       console.log(`🔍 Looking for devices with email: ${targetEmail}`);
       const [rows] = await pool.query(
         `SELECT fcm_token, device_type FROM user_devices WHERE email = ?`,
@@ -4138,14 +4150,35 @@ app.post("/notifications/send-push", async (req, res) => {
       
     } else if (targetRole) {
       // Get tokens for all users with this role
-      // Devi avere una tabella users che mappa email a ruoli
       console.log(`🔍 Looking for devices for role: ${targetRole}`);
       
-      // Prima trova tutte le email con quel ruolo
-      const [userRows] = await pool.query(
-        `SELECT email FROM users WHERE role = ? OR access = ?`,
-        [targetRole, targetRole]
-      );
+      // Prova a cercare in diverse tabelle possibili
+      let userRows = [];
+      
+      // Prova nella tabella users
+      try {
+        const [rows] = await pool.query(
+          `SELECT email FROM users WHERE role = ? OR access = ? OR UPPER(role) = UPPER(?) OR UPPER(access) = UPPER(?)`,
+          [targetRole, targetRole, targetRole, targetRole]
+        );
+        userRows = rows;
+      } catch (e) {
+        console.log('⚠️ Error querying users table:', e.message);
+      }
+      
+      // Se non trova nella tabella users, prova nella tabella Employees
+      if (userRows.length === 0) {
+        try {
+          const [rows] = await pool.query(
+            `SELECT email FROM Employees WHERE designation = ? OR UPPER(designation) = UPPER(?)`,
+            [targetRole, targetRole]
+          );
+          userRows = rows;
+          console.log(`📊 Found ${userRows.length} employees with designation ${targetRole}`);
+        } catch (e) {
+          console.log('⚠️ Error querying Employees table:', e.message);
+        }
+      }
       
       console.log(`📊 Found ${userRows.length} users with role ${targetRole}`);
       
@@ -4154,7 +4187,7 @@ app.post("/notifications/send-push", async (req, res) => {
         
         // Poi trova i dispositivi per queste email
         const [deviceRows] = await pool.query(
-          `SELECT fcm_token, device_type, email FROM user_devices WHERE email IN (?)`,
+          `SELECT fcm_token, device_type, email FROM user_devices WHERE email IN (?) AND fcm_token IS NOT NULL AND fcm_token != ''`,
           [emails]
         );
         
@@ -4164,6 +4197,8 @@ app.post("/notifications/send-push", async (req, res) => {
         });
         
         tokens = deviceRows.map(row => row.fcm_token).filter(t => t && t.length > 0);
+      } else {
+        console.log(`⚠️ No users found with role ${targetRole}`);
       }
     }
 
@@ -4217,7 +4252,8 @@ app.post("/notifications/send-push", async (req, res) => {
       message: "Push notification processed",
       notificationId,
       tokensFound: tokens.length,
-      tokensSent: tokens.length 
+      tokensSent: tokens.length,
+      targetAll: targetRole === 'ALL'
     });
 
   } catch (err) {
