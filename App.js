@@ -4059,72 +4059,155 @@ app.post("/notifications/send-push", async (req, res) => {
   }
 });
 
-// ENDPOINT DI TEST SEMPLICE
-app.post("/test-notifications/simple", async (req, res) => {
+// Endpoint per test notifiche
+app.post("/test-notifications/every-minute", async (req, res) => {
+  console.log("=================================");
+  console.log("📱 TEST NOTIFICATION ENDPOINT CHIAMATO");
+  console.log("=================================");
+  console.log("📦 Request body:", req.body);
+  
   const { db, email } = req.body;
   
-  console.log("📱 TEST NOTIFICATION REQUEST");
-  console.log(`Email: ${email}, DB: ${db}`);
+  // Validazione input
+  if (!db || !email) {
+    console.log("❌ ERRORE: db o email mancanti");
+    return res.status(400).json({ 
+      success: false, 
+      message: "db and email are required" 
+    });
+  }
 
   try {
+    console.log(`📧 Email: ${email}`);
+    console.log(`💾 Database: ${db}`);
+    
     const pool = getPool(db);
     
     // 1. SALVA NEL DATABASE
-    const [result] = await pool.query(
+    console.log("📝 1. Salvo nel database...");
+    const [insertResult] = await pool.query(
       `INSERT INTO Notifications 
-       (targetEmail, title, message, type, isRead, createdAt, authorEmail) 
-       VALUES (?, ?, ?, ?, 0, NOW(), ?)`,
-      [email, '🔔 Test Notifica', 'Questa è una notifica di test', 'SYSTEM', 'system@solura.com']
+       (targetRole, targetEmail, title, message, type, isRead, createdAt, authorEmail) 
+       VALUES (?, ?, ?, ?, ?, 0, NOW(), ?)`,
+      [
+        'EMPLOYEE',
+        email,
+        '📱 Test Notifica',
+        `Test da dashboard - ${new Date().toLocaleTimeString()}`,
+        'SYSTEM',
+        'system@solura.com'
+      ]
     );
+    
+    console.log(`✅ Notifica salvata con ID: ${insertResult.insertId}`);
 
     // 2. CERCA I TOKEN FCM
+    console.log("🔍 2. Cerco token FCM...");
     const [devices] = await pool.query(
-      "SELECT fcm_token FROM user_devices WHERE email = ?",
+      "SELECT fcm_token, device_type FROM user_devices WHERE email = ?",
       [email]
     );
+    
+    console.log(`📊 Trovati ${devices.length} dispositivi:`);
+    devices.forEach((d, i) => {
+      console.log(`   ${i+1}. Tipo: ${d.device_type} | Token: ${d.fcm_token ? d.fcm_token.substring(0, 20) + '...' : 'NO TOKEN'}`);
+    });
 
-    console.log(`Trovati ${devices.length} dispositivi`);
+    if (devices.length === 0) {
+      console.log("⚠️ Nessun dispositivo trovato");
+      return res.json({ 
+        success: true, 
+        message: "Notification saved but no devices found",
+        deliveredCount: 0,
+        notificationId: insertResult.insertId
+      });
+    }
 
     // 3. INVIA NOTIFICHE PUSH
+    console.log("📤 3. Invio notifiche push...");
     let sentCount = 0;
+    const results = [];
+
     for (const device of devices) {
-      if (!device.fcm_token) continue;
+      if (!device.fcm_token) {
+        console.log(`   ⚠️ Dispositivo senza token, salto...`);
+        continue;
+      }
 
       const message = {
         token: device.fcm_token,
         notification: {
-          title: '🔔 Test',
-          body: 'Notifica di test',
+          title: '📱 Test Notifica',
+          body: `Test da dashboard - ${new Date().toLocaleTimeString()}`,
         },
         data: {
           type: 'SYSTEM',
+          notificationSubtype: 'TEST',
+          timestamp: new Date().toISOString(),
+          notificationId: insertResult.insertId.toString(),
           click_action: 'FLUTTER_NOTIFICATION_CLICK',
         },
         android: {
           priority: 'high',
           notification: {
             channelId: 'rota_notifications',
+            clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+            sound: 'default',
+          },
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: 'default',
+              badge: 1,
+            },
           },
         },
       };
 
       try {
-        await admin.messaging().send(message);
+        console.log(`   📤 Invio a dispositivo ${device.fcm_token.substring(0, 20)}...`);
+        const response = await admin.messaging().send(message);
+        console.log(`   ✅ Inviato con successo!`);
         sentCount++;
-      } catch (e) {
-        console.error(`Errore invio: ${e.message}`);
+        results.push({ success: true, token: device.fcm_token.substring(0, 20) + '...' });
+      } catch (error) {
+        console.error(`   ❌ Errore invio: ${error.message}`);
+        results.push({ success: false, token: device.fcm_token.substring(0, 20) + '...', error: error.message });
+        
+        // Se token non valido, rimuovilo
+        if (error.code === 'messaging/registration-token-not-registered') {
+          console.log(`   🗑️ Token non valido, rimuovo dal database`);
+          await pool.query(
+            "DELETE FROM user_devices WHERE fcm_token = ?",
+            [device.fcm_token]
+          );
+        }
       }
     }
 
+    console.log("=================================");
+    console.log(`📊 RISULTATI FINALI:`);
+    console.log(`   ✅ Inviati con successo: ${sentCount}/${devices.length}`);
+    console.log(`   📝 Dettaglio:`, results);
+    console.log("=================================");
+
     res.json({ 
       success: true, 
-      message: 'Test notification sent',
-      deliveredCount: sentCount
+      message: "Test notification sent",
+      deliveredCount: sentCount,
+      totalDevices: devices.length,
+      notificationId: insertResult.insertId,
+      results: results
     });
 
   } catch (error) {
-    console.error('❌ Errore:', error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error("❌ ERRORE GENERALE:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error sending test notification",
+      error: error.message 
+    });
   }
 });
 
