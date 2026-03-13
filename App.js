@@ -3837,7 +3837,7 @@ app.post('/send-notification', async (req, res) => {
                 android: {
                     priority: 'high',
                     notification: {
-                        sound: null,
+                        sound: 'default',
                         channelId: 'rota_notifications',
                         clickAction: 'FLUTTER_NOTIFICATION_CLICK',
                     },
@@ -3845,7 +3845,7 @@ app.post('/send-notification', async (req, res) => {
                 apns: {
                     payload: {
                         aps: {
-                            sound: null,
+                            sound: 'default',
                             badge: 1,
                         },
                     },
@@ -4068,7 +4068,6 @@ app.post("/test-notifications/every-minute", async (req, res) => {
   
   const { db, email } = req.body;
   
-  // Validazione input
   if (!db || !email) {
     console.log("❌ ERRORE: db o email mancanti");
     return res.status(400).json({ 
@@ -4152,15 +4151,17 @@ app.post("/test-notifications/every-minute", async (req, res) => {
           notification: {
             channelId: 'rota_notifications',
             clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-            sound: null,
           },
         },
         apns: {
           payload: {
             aps: {
-              sound: null,
+              sound: 'default',  // 🔴 CORRETTO: stringa non vuota
               badge: 1,
             },
+          },
+          headers: {
+            'apns-priority': '10',
           },
         },
       };
@@ -4168,14 +4169,13 @@ app.post("/test-notifications/every-minute", async (req, res) => {
       try {
         console.log(`   📤 Invio a dispositivo ${device.fcm_token.substring(0, 20)}...`);
         const response = await admin.messaging().send(message);
-        console.log(`   ✅ Inviato con successo!`);
+        console.log(`   ✅ Inviato con successo! Response:`, response);
         sentCount++;
         results.push({ success: true, token: device.fcm_token.substring(0, 20) + '...' });
       } catch (error) {
         console.error(`   ❌ Errore invio: ${error.message}`);
         results.push({ success: false, token: device.fcm_token.substring(0, 20) + '...', error: error.message });
         
-        // Se token non valido, rimuovilo
         if (error.code === 'messaging/registration-token-not-registered') {
           console.log(`   🗑️ Token non valido, rimuovo dal database`);
           await pool.query(
@@ -4234,7 +4234,7 @@ async function sendFCMNotification(token, { title, body, data }) {
     apns: {
       payload: {
         aps: {
-          sound: null,
+          sound: 'default',
           badge: 1,
         },
       },
