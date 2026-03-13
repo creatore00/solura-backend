@@ -3837,7 +3837,7 @@ app.post('/send-notification', async (req, res) => {
                 android: {
                     priority: 'high',
                     notification: {
-                        sound: 'default',
+                        sound: null,
                         channelId: 'rota_notifications',
                         clickAction: 'FLUTTER_NOTIFICATION_CLICK',
                     },
@@ -3845,7 +3845,7 @@ app.post('/send-notification', async (req, res) => {
                 apns: {
                     payload: {
                         aps: {
-                            sound: 'default',
+                            sound: null,
                             badge: 1,
                         },
                     },
@@ -4152,13 +4152,13 @@ app.post("/test-notifications/every-minute", async (req, res) => {
           notification: {
             channelId: 'rota_notifications',
             clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-            sound: 'default',
+            sound: null,
           },
         },
         apns: {
           payload: {
             aps: {
-              sound: 'default',
+              sound: null,
               badge: 1,
             },
           },
@@ -4234,7 +4234,7 @@ async function sendFCMNotification(token, { title, body, data }) {
     apns: {
       payload: {
         aps: {
-          sound: 'default',
+          sound: null,
           badge: 1,
         },
       },
