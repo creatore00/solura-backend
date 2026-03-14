@@ -2991,7 +2991,7 @@ app.get("/all-rota", async (req, res) => {
         TIME_FORMAT(r.startTime, '%H:%i') as startTime,
         TIME_FORMAT(r.endTime, '%H:%i') as endTime,
         COALESCE(e.designation, 'Unknown') as designation
-      FROM rota r
+      FROM Published r
       LEFT JOIN Employees e ON r.name = e.name AND r.lastName = e.lastName
       WHERE STR_TO_DATE(SUBSTRING_INDEX(r.day, ' (', 1), '%d/%m/%Y') 
             BETWEEN ? AND ?
