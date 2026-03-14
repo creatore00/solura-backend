@@ -522,7 +522,8 @@ app.get("/rota/employees", async (req, res) => {
   try {
     const pool = getPool(db);
     const [rows] = await pool.query(
-      "SELECT id, name, lastName, email, designation FROM Employees ORDER BY name"
+      `SELECT id, name, lastName, email, designation FROM Employees WHERE situation IS NULL
+      OR TRIM(situation) = '' ORDER BY name`
     );
     
     res.json({ success: true, employees: rows });
@@ -2492,8 +2493,8 @@ app.post("/register-device", async (req, res) => {
   console.log("📱 REGISTER-DEVICE RICHIESTA RICEVUTA");
   console.log("=================================");
   console.log(`📧 Email: ${email}`);
-  console.log(`🆔 UserId: ${userId}`);
-  console.log(`📱 Device Type: ${deviceType}`);
+  console.log(`🆔 UserId: ${userId} (type: ${typeof userId})`);
+  console.log(`📱 Device Type from Flutter: ${deviceType} (type: ${typeof deviceType})`);
   console.log(`💾 Database: ${dbName}`);
   console.log(`🔑 FCM Token: ${fcmToken ? fcmToken.substring(0, 20) + '...' : 'MANCANTE'}`);
   console.log("=================================");
@@ -2511,12 +2512,26 @@ app.post("/register-device", async (req, res) => {
     const pool = getPool(dbName);
     console.log(`🔌 Connesso al database: ${dbName}`);
     
+    // 🔍 Check the table structure first
+    console.log("🔍 Verifico struttura tabella user_devices...");
+    const [columns] = await pool.query("SHOW COLUMNS FROM user_devices");
+    console.log("📊 Colonne tabella:");
+    columns.forEach(col => {
+      console.log(`   - ${col.Field}: ${col.Type} (Default: ${col.Default})`);
+    });
+    
+    // Check if device_type column has a default value
+    const deviceTypeColumn = columns.find(col => col.Field === 'device_type');
+    if (deviceTypeColumn && deviceTypeColumn.Default) {
+      console.log(`⚠️ ATTENZIONE: device_type ha default value: '${deviceTypeColumn.Default}'`);
+      console.log(`   Questo potrebbe sovrascrivere il valore '${deviceType}' se non viene passato correttamente`);
+    }
+    
     // LOG 2: Controllo se token esiste
     console.log(`🔍 Cerco token esistente per email: ${email}`);
     
-    // NOTA: user_id è il nome del campo, non userId
     const [existing] = await pool.query(
-      "SELECT id, created_at, updated_at FROM user_devices WHERE email = ? AND fcm_token = ?",
+      "SELECT id, created_at, updated_at, device_type FROM user_devices WHERE email = ? AND fcm_token = ?",
       [email, fcmToken]
     );
     
@@ -2524,18 +2539,33 @@ app.post("/register-device", async (req, res) => {
       // 🟢 LOG 3: Token già esistente
       console.log("✅ TOKEN GIA' REGISTRATO - Aggiorno timestamp");
       console.log(`   ID dispositivo: ${existing[0].id}`);
+      console.log(`   Device Type attuale nel DB: ${existing[0].device_type}`);
       console.log(`   Creato il: ${existing[0].created_at}`);
       console.log(`   Ultimo aggiornamento: ${existing[0].updated_at}`);
       
-      await pool.query(
-        "UPDATE user_devices SET updated_at = NOW() WHERE id = ?",
-        [existing[0].id]
-      );
+      // Also update device_type if it changed
+      if (existing[0].device_type !== deviceType) {
+        console.log(`🔄 Aggiorno device_type da '${existing[0].device_type}' a '${deviceType}'`);
+        await pool.query(
+          "UPDATE user_devices SET updated_at = NOW(), device_type = ? WHERE id = ?",
+          [deviceType, existing[0].id]
+        );
+      } else {
+        await pool.query(
+          "UPDATE user_devices SET updated_at = NOW() WHERE id = ?",
+          [existing[0].id]
+        );
+      }
       
       console.log(`✅ Dispositivo aggiornato con successo (ID: ${existing[0].id})`);
     } else {
       // 🟢 LOG 4: Nuovo token
       console.log("🆕 NUOVO DISPOSITIVO - Creo nuova registrazione");
+      console.log(`   Valori da inserire:`);
+      console.log(`   - user_id: ${userId} (${typeof userId})`);
+      console.log(`   - email: ${email}`);
+      console.log(`   - fcm_token: ${fcmToken.substring(0, 20)}...`);
+      console.log(`   - device_type: '${deviceType}' (${typeof deviceType})`);
       
       // NOTA: i nomi dei campi sono: user_id, email, fcm_token, device_type
       const [result] = await pool.query(
@@ -2545,6 +2575,16 @@ app.post("/register-device", async (req, res) => {
       );
       
       console.log(`✅ Nuovo dispositivo registrato con ID: ${result.insertId}`);
+      
+      // Verify what was actually inserted
+      const [newDevice] = await pool.query(
+        "SELECT id, device_type, created_at FROM user_devices WHERE id = ?",
+        [result.insertId]
+      );
+      console.log(`🔍 Verifica inserimento:`);
+      console.log(`   - ID: ${newDevice[0].id}`);
+      console.log(`   - device_type nel DB: '${newDevice[0].device_type}'`);
+      console.log(`   - Corrisponde a quello inviato? ${newDevice[0].device_type === deviceType ? '✅ SI' : '❌ NO'}`);
     }
     
     // LOG 5: Verifica quanti dispositivi ha l'utente
@@ -2554,14 +2594,20 @@ app.post("/register-device", async (req, res) => {
     );
     console.log(`📊 Totale dispositivi registrati per ${email}: ${count[0].total}`);
     
-    // LOG 6: Lista di tutti i dispositivi dell'utente
+    // LOG 6: Lista di tutti i dispositivi dell'utente con tutti i dettagli
     const [devices] = await pool.query(
-      "SELECT id, device_type, updated_at FROM user_devices WHERE email = ? ORDER BY updated_at DESC",
+      `SELECT id, device_type, created_at, updated_at 
+       FROM user_devices 
+       WHERE email = ? 
+       ORDER BY updated_at DESC`,
       [email]
     );
-    console.log("📱 Dispositivi attivi:");
+    console.log("📱 Dispositivi attivi (dettaglio completo):");
     devices.forEach((d, index) => {
-      console.log(`   ${index + 1}. ID: ${d.id} | Tipo: ${d.device_type || 'sconosciuto'} | Ultimo accesso: ${d.updated_at}`);
+      console.log(`   ${index + 1}. ID: ${d.id}`);
+      console.log(`      Tipo nel DB: '${d.device_type}'`);
+      console.log(`      Creato: ${d.created_at}`);
+      console.log(`      Aggiornato: ${d.updated_at}`);
     });
     
     console.log("=================================");
