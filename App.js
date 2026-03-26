@@ -855,7 +855,7 @@ app.get("/employee/download-payslip/:id", (req, res) => {
     pool.query(query, [id, email], (err, rows) => {
       if (err) {
         console.error("❌ Error downloading payslip:", err);
-        return res.status(500).json({ success: false, message: "Database error" });
+        return res.status(500).json({ success: false, message: "Database error: " + err.message });
       }
       
       console.log(`✅ Query result rows: ${rows ? rows.length : 0}`);
@@ -904,65 +904,8 @@ app.get("/employee/download-payslip/:id", (req, res) => {
     });
   } catch (error) {
     console.error("❌ Exception in download-payslip:", error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error: ' + error.message });
   }
-});
-
-// View payslip (get base64 content)
-app.get("/employee/view-payslip/:id", (req, res) => {
-  const { db, email } = req.query;
-  const { id } = req.params;
-
-  if (!db || !email || !id) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "Database, email, and payslip ID are required" 
-    });
-  }
-
-  const pool = getPool(db);
-  
-  pool.query(
-    'SELECT fileContent, Month, payslip_number FROM payslips WHERE id = ? AND email = ?',
-    [id, email],
-    (err, rows) => {
-      if (err) {
-        console.error("Error viewing payslip:", err);
-        return res.status(500).json({ success: false, message: "Database error" });
-      }
-      
-      if (!rows || rows.length === 0) {
-        return res.status(404).json({ success: false, message: 'Payslip not found or unauthorized' });
-      }
-      
-      const payslip = rows[0];
-      const buffer = payslip.fileContent;
-      
-      if (!buffer || buffer.length === 0) {
-        return res.status(404).json({ success: false, message: 'File content is empty' });
-      }
-      
-      // Detect file type from content
-      let fileType = 'application/octet-stream';
-      
-      const header = buffer.toString('ascii', 0, 4);
-      if (header === '%PDF') {
-        fileType = 'application/pdf';
-      } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
-        fileType = 'image/jpeg';
-      } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
-        fileType = 'image/png';
-      }
-      
-      res.json({
-        success: true,
-        fileContent: buffer.toString('base64'),
-        fileType: fileType,
-        month: payslip.Month,
-        payslipNumber: payslip.payslip_number
-      });
-    }
-  );
 });
 
 // ==================== FEED ENDPOINTS ====================
