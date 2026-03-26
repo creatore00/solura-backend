@@ -516,9 +516,9 @@ app.post("/rota/shift-request/:id/accept", async (req, res) => {
     // 6) Insert into rota (YOUR columns)
     await conn.query(
       `INSERT INTO rota
-       (id, name, lastName, day, startTime, endTime, designation)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, emp.name, emp.lastName, shift.day_label, shift.start_time, shift.end_time, empDesignation]
+      (id, name, lastName, day, startTime, endTime, designation, Published)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, emp.name, emp.lastName, shift.day_label, shift.start_time, shift.end_time, empDesignation, 'Published']
     );
 
     await conn.commit();
@@ -645,18 +645,6 @@ app.post("/rota/add-direct", async (req, res) => {
       employeeDesignation 
     } = req.body;
 
-    console.log("=================================");
-    console.log("📝 ADD TO ROTA DIRECTLY");
-    console.log("=================================");
-    console.log("db:", db);
-    console.log("userEmail:", userEmail);
-    console.log("dayLabel:", dayLabel); // Es: "13/03/2026 (Friday)"
-    console.log("dayDate:", dayDate);    // Es: "2026-03-13"
-    console.log("startTime:", startTime);
-    console.log("endTime:", endTime);
-    console.log("employeeEmail:", employeeEmail);
-    console.log("=================================");
-
     if (!db || !dayLabel || !startTime || !endTime || !employeeEmail) {
       return res.status(400).json({ 
         success: false, 
@@ -671,19 +659,20 @@ app.post("/rota/add-direct", async (req, res) => {
     
     // Inserisci nella tabella rota - usa dayLabel che ha già il formato corretto
     const [result] = await pool.query(
-      `INSERT INTO rota 
-       (id, name, lastName, day, startTime, endTime, designation) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        shiftId,
-        employeeName,
-        employeeLastName,
-        dayLabel,  // Già nel formato "dd/mm/yyyy (Monday)"
-        startTime,
-        endTime,
-        employeeDesignation
-      ]
-    );
+          `INSERT INTO rota 
+          (id, name, lastName, day, startTime, endTime, designation, Published) 
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            shiftId,
+            employeeName,
+            employeeLastName,
+            dayLabel,  // Già nel formato "dd/mm/yyyy (Monday)"
+            startTime,
+            endTime,
+            employeeDesignation,
+            'Published'
+          ]
+        );
 
     console.log(`✅ Shift added to rota with ID: ${shiftId}`);
     console.log(`✅ Day format: ${dayLabel}`);
