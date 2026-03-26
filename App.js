@@ -3226,9 +3226,10 @@ app.post("/save-shift", async (req, res) => {
     const endTimeWithSeconds = ensureTimeWithSeconds(endTime);
     
     if (entryId) {
+      // UPDATE existing shift - set ConfirmedByTM to 'yes'
       await pool.query(
         `UPDATE rota 
-         SET startTime = ?, endTime = ?, wage = ?, designation = ?
+         SET startTime = ?, endTime = ?, wage = ?, designation = ?, ConfirmedByTM = 'yes'
          WHERE id = ?`,
         [startTimeWithSeconds, endTimeWithSeconds, wage || 0, designation || '', entryId]
       );
@@ -3267,9 +3268,10 @@ app.post("/save-shift", async (req, res) => {
         });
       }
       
+      // INSERT new shift - set ConfirmedByTM to 'yes'
       await pool.query(
-        `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation, ConfirmedByTM) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'yes')`,
         [uniqueId, name, lastName, day, startTimeWithSeconds, endTimeWithSeconds, 
          wage || 0, designation || '']
       );
