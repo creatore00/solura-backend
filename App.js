@@ -752,6 +752,114 @@ app.get("/employee/payslip-months", async (req, res) => {
   }
 });
 
+// Download payslip for employee
+app.get("/employee/download-payslip/:id", async (req, res) => {
+  const { db, email } = req.query;
+  const { id } = req.params;
+
+  if (!db || !email || !id) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Database, email, and payslip ID are required" 
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    // Verify this payslip belongs to the employee
+    const [rows] = await pool.promise().query(
+      'SELECT fileContent, name, lastName, Month, payslip_number FROM payslips WHERE id = ? AND email = ?',
+      [id, email]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Payslip not found or unauthorized' });
+    }
+    
+    const payslip = rows[0];
+    const buffer = payslip.fileContent;
+    
+    // Detect file type from content
+    let fileType = 'application/octet-stream';
+    let fileExt = 'bin';
+    
+    if (buffer.toString('ascii', 0, 4) === '%PDF') {
+      fileType = 'application/pdf';
+      fileExt = 'pdf';
+    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+      fileType = 'image/jpeg';
+      fileExt = 'jpg';
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+      fileType = 'image/png';
+      fileExt = 'png';
+    }
+    
+    const fileName = `earnings_${payslip.name}_${payslip.lastName}_${payslip.Month}_${payslip.payslip_number}.${fileExt}`;
+    
+    res.setHeader('Content-Type', fileType);
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(payslip.fileContent);
+    
+  } catch (error) {
+    console.error('Error downloading payslip:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// View payslip (get base64 content)
+app.get("/employee/view-payslip/:id", async (req, res) => {
+  const { db, email } = req.query;
+  const { id } = req.params;
+
+  if (!db || !email || !id) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Database, email, and payslip ID are required" 
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    // Verify this payslip belongs to the employee
+    const [rows] = await pool.promise().query(
+      'SELECT fileContent, Month, payslip_number FROM payslips WHERE id = ? AND email = ?',
+      [id, email]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Payslip not found or unauthorized' });
+    }
+    
+    const payslip = rows[0];
+    const buffer = payslip.fileContent;
+    
+    // Detect file type from content
+    let fileType = 'application/octet-stream';
+    
+    if (buffer.toString('ascii', 0, 4) === '%PDF') {
+      fileType = 'application/pdf';
+    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+      fileType = 'image/jpeg';
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+      fileType = 'image/png';
+    }
+    
+    res.json({
+      success: true,
+      fileContent: buffer.toString('base64'),
+      fileType: fileType,
+      month: payslip.Month,
+      payslipNumber: payslip.payslip_number
+    });
+    
+  } catch (error) {
+    console.error('Error viewing payslip:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ==================== FEED ENDPOINTS ====================
 
 // Create a new feed post
