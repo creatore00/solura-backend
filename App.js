@@ -219,7 +219,7 @@ async function sendMissingPublishedNotification(dbName, missingEmployees) {
   for (const role of roles) {
     await pool.query(
       `INSERT INTO Notifications (targetRole, title, message, type, isRead, createdAt, authorEmail)
-       VALUES (?, ?, ?, 'SYSTEM', 0, NOW(), 'system@solura.com')`,
+       VALUES (?, ?, ?, 'SYSTEM', 0, NOW(), 'no-reply@solura.com')`,
       [role, title, message]
     );
   }
@@ -240,7 +240,7 @@ cron.schedule('59 23 * * *', async () => {
       try {
         const [rows] = await dbPool.query(
           `SELECT DISTINCT name, lastName FROM rota 
-           WHERE day = ? AND (Published IS NULL OR Published = '')
+           WHERE day = ? AND (ConfirmedByTM IS NULL OR ConfirmedByTM != 'yes')
            ORDER BY lastName, name`,
           [todayFormatted]
         );
@@ -267,21 +267,22 @@ app.get('/api/missing-published', async (req, res) => {
 
   try {
     const pool = getPool(db);
-    // Convert YYYY-MM-DD to "dd/mm/yyyy (Day)"
     const date = moment.tz(day, 'Europe/London');
     const formattedDay = date.format('DD/MM/YYYY (dddd)');
-    
+
     const [rows] = await pool.query(
-      `SELECT name, lastName, startTime, endTime, day
-       FROM rota
-       WHERE day = ? AND (Published IS NULL OR Published = '')
-       ORDER BY lastName, name`,
+      `SELECT r.name, r.lastName, r.startTime, r.endTime, r.day, e.email
+       FROM rota r
+       LEFT JOIN Employees e ON r.name = e.name AND r.lastName = e.lastName
+       WHERE r.day = ? 
+         AND (r.ConfirmedByTM IS NULL OR r.ConfirmedByTM != 'yes')
+       ORDER BY r.lastName, r.name`,
       [formattedDay]
     );
-    
+
     res.json({ success: true, missing: rows });
   } catch (error) {
-    console.error('Error fetching missing published:', error);
+    console.error('Error fetching missing confirmed shifts:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
