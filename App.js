@@ -735,6 +735,7 @@ app.get("/employee/payslips", async (req, res) => {
   }
 });
 
+a
 // Get months with available payslips for dropdown
 app.get("/employee/payslip-months", async (req, res) => {
   const { db, email } = req.query;
@@ -806,7 +807,7 @@ function formatMonthDisplay(monthYear) {
 app.get("/employee/download-payslip/:id", async (req, res) => {
   const { db, email } = req.query;
   const { id } = req.params;
-  
+
   if (!db || !email || !id) {
     console.log("❌ Missing db, email, or id");
     return res.status(400).json({ 
