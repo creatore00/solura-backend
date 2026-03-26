@@ -608,6 +608,152 @@ app.post("/rota/add-direct", async (req, res) => {
   }
 });
 
+// ==================== PAYSLIPS ENDPOINTS ====================
+
+// Get payslips for logged-in employee with pagination and month filter
+app.get("/employee/payslips", async (req, res) => {
+  const { db, email, month, page = 1, limit = 10 } = req.query;
+
+  if (!db || !email) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Database and email are required" 
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    
+    // Build query conditions
+    let whereConditions = ["email = ?"];
+    let queryParams = [email];
+    
+    if (month) {
+      whereConditions.push("Month = ?");
+      queryParams.push(month);
+    }
+    
+    // Get total count for pagination
+    const countQuery = `
+      SELECT COUNT(*) as total 
+      FROM payslips 
+      WHERE ${whereConditions.join(" AND ")}
+    `;
+    
+    const [countResult] = await pool.query(countQuery, queryParams);
+    const total = countResult[0].total;
+    
+    // Get payslips with pagination
+    const dataQuery = `
+      SELECT 
+        id, 
+        name, 
+        lastName, 
+        email, 
+        Month, 
+        payslip_number, 
+        date,
+        fileType
+      FROM payslips 
+      WHERE ${whereConditions.join(" AND ")}
+      ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC, 
+               payslip_number ASC,
+               date DESC
+      LIMIT ? OFFSET ?
+    `;
+    
+    const [rows] = await pool.query(dataQuery, [...queryParams, parseInt(limit), offset]);
+    
+    // Format the response
+    const payslips = rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      lastName: row.lastName,
+      email: row.email,
+      month: row.Month,
+      payslipNumber: row.payslip_number,
+      uploadDate: row.date,
+      fileType: row.fileType || 'application/pdf',
+      // Generate month display name
+      monthDisplay: formatMonthDisplay(row.Month)
+    }));
+    
+    res.json({
+      success: true,
+      payslips: payslips,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: total,
+        totalPages: Math.ceil(total / parseInt(limit)),
+        hasMore: offset + payslips.length < total
+      }
+    });
+    
+  } catch (error) {
+    console.error("Error fetching employee payslips:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error fetching payslips",
+      error: error.message 
+    });
+  }
+});
+
+// Helper function to format month display
+function formatMonthDisplay(monthYear) {
+  if (!monthYear) return '';
+  const [year, month] = monthYear.split('-');
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  return `${monthNames[parseInt(month) - 1]} ${year}`;
+}
+
+// Get months with available payslips for dropdown
+app.get("/employee/payslip-months", async (req, res) => {
+  const { db, email } = req.query;
+
+  if (!db || !email) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Database and email are required" 
+    });
+  }
+
+  try {
+    const pool = getPool(db);
+    
+    const [rows] = await pool.query(
+      `SELECT DISTINCT Month 
+       FROM payslips 
+       WHERE email = ? 
+       ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC`,
+      [email]
+    );
+    
+    const months = rows.map(row => ({
+      value: row.Month,
+      display: formatMonthDisplay(row.Month)
+    }));
+    
+    res.json({
+      success: true,
+      months: months
+    });
+    
+  } catch (error) {
+    console.error("Error fetching payslip months:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error fetching months",
+      error: error.message 
+    });
+  }
+});
+
 // ==================== FEED ENDPOINTS ====================
 
 // Create a new feed post
