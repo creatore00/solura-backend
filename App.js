@@ -735,7 +735,6 @@ app.get("/employee/payslips", async (req, res) => {
   }
 });
 
-a
 // Get months with available payslips for dropdown
 app.get("/employee/payslip-months", async (req, res) => {
   const { db, email } = req.query;
