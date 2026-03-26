@@ -644,7 +644,7 @@ app.get("/employee/payslips", async (req, res) => {
     const [countResult] = await pool.query(countQuery, queryParams);
     const total = countResult[0].total;
     
-    // Get payslips with pagination
+    // Get payslips with pagination - REMOVED fileType
     const dataQuery = `
       SELECT 
         id, 
@@ -653,8 +653,7 @@ app.get("/employee/payslips", async (req, res) => {
         email, 
         Month, 
         payslip_number, 
-        date,
-        fileType
+        date
       FROM payslips 
       WHERE ${whereConditions.join(" AND ")}
       ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC, 
@@ -674,7 +673,6 @@ app.get("/employee/payslips", async (req, res) => {
       month: row.Month,
       payslipNumber: row.payslip_number,
       uploadDate: row.date,
-      fileType: row.fileType || 'application/pdf',
       // Generate month display name
       monthDisplay: formatMonthDisplay(row.Month)
     }));
@@ -751,6 +749,102 @@ app.get("/employee/payslip-months", async (req, res) => {
       message: "Server error fetching months",
       error: error.message 
     });
+  }
+});
+
+// Endpoint to download payslip - NO fileType needed
+app.get('/insertpayslip/api/download-payslip/:id', isAuthenticated, async (req, res) => {
+  const dbName = req.session.user.dbName;
+  const { id } = req.params;
+  
+  if (!dbName || !id) {
+    return res.status(400).json({ success: false, message: 'Missing required parameters' });
+  }
+  
+  try {
+    const pool = getPool(dbName);
+    const [rows] = await pool.promise().query(
+      'SELECT fileContent, name, lastName, Month, payslip_number FROM payslips WHERE id = ?',
+      [id]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Payslip not found' });
+    }
+    
+    const payslip = rows[0];
+    const buffer = payslip.fileContent;
+    
+    // Detect file type from content
+    let fileType = 'application/octet-stream';
+    let fileExt = 'bin';
+    
+    if (buffer.toString('ascii', 0, 4) === '%PDF') {
+      fileType = 'application/pdf';
+      fileExt = 'pdf';
+    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+      fileType = 'image/jpeg';
+      fileExt = 'jpg';
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+      fileType = 'image/png';
+      fileExt = 'png';
+    }
+    
+    const fileName = `earnings_${payslip.name}_${payslip.lastName}_${payslip.Month}_${payslip.payslip_number}.${fileExt}`;
+    
+    res.setHeader('Content-Type', fileType);
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(payslip.fileContent);
+    
+  } catch (error) {
+    console.error('Error downloading payslip:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Endpoint to get a single payslip for viewing - NO fileType
+app.get('/insertpayslip/api/payslip/:id', isAuthenticated, async (req, res) => {
+  const dbName = req.session.user.dbName;
+  const { id } = req.params;
+  
+  if (!dbName || !id) {
+    return res.status(400).json({ success: false, message: 'Missing required parameters' });
+  }
+  
+  try {
+    const pool = getPool(dbName);
+    const [rows] = await pool.promise().query(
+      'SELECT id, fileContent FROM payslips WHERE id = ?',
+      [id]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Payslip not found' });
+    }
+    
+    const payslip = rows[0];
+    
+    // Detect file type from content
+    let fileType = 'application/octet-stream';
+    const buffer = payslip.fileContent;
+    
+    if (buffer.toString('ascii', 0, 4) === '%PDF') {
+      fileType = 'application/pdf';
+    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+      fileType = 'image/jpeg';
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+      fileType = 'image/png';
+    }
+    
+    res.json({
+      success: true,
+      fileContent: payslip.fileContent.toString('base64'),
+      fileType: fileType
+    });
+    
+  } catch (error) {
+    console.error('Error fetching payslip:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
