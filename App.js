@@ -578,11 +578,12 @@ app.get("/rota/my-day", async (req, res) => {
 
     // 3) fetch rota entries for that day for that employee
     const [rotaRows] = await conn.query(
-      `SELECT id, day, startTime, endTime, designation
-       FROM rota
-       WHERE TRIM(name) = TRIM(?)
-         AND TRIM(lastName) = TRIM(?)
-         AND day LIKE CONCAT(?, '%')`,
+      `SELECT id, day, startTime, endTime, designation, Published
+      FROM rota
+      WHERE TRIM(name) = TRIM(?)
+        AND TRIM(lastName) = TRIM(?)
+        AND day LIKE CONCAT(?, '%')
+        AND Published = 'Published'`,
       [emp.name, emp.lastName, dayPrefix]
     );
 
@@ -3304,7 +3305,7 @@ app.get("/rota", async (req, res) => {
     const query = `
       SELECT id, name, lastName, day, startTime, endTime, designation, wage
       FROM rota
-      WHERE name = ? AND lastName = ?
+      WHERE name = ? AND lastName = ? AND Published = 'Published'
         AND STR_TO_DATE(day, '%d/%m/%Y') BETWEEN
             DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY)
             AND DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 6 DAY)
@@ -3481,7 +3482,7 @@ app.get("/today-shifts", async (req, res) => {
     const [shiftRows] = await pool.query(
       `SELECT id, name, lastName, day, startTime, endTime, designation, wage 
        FROM rota 
-       WHERE name = ? AND lastName = ? AND day = ?
+       WHERE name = ? AND lastName = ? AND day = ? AND Published = 'Published'
        ORDER BY startTime ASC`,
       [name, lastName, day]
     );
@@ -3607,7 +3608,7 @@ app.post("/save-shift", async (req, res) => {
         WHERE id = ?`,
         [startTimeWithSeconds, endTimeWithSeconds, wage || 0, designation || '', entryId]
       );
-      
+
       return res.json({ 
         success: true, 
         message: "Shift updated successfully",
@@ -3839,10 +3840,10 @@ app.post("/add-another-shift", async (req, res) => {
     const endTimeWithSeconds = ensureTimeWithSeconds(endTime);
     
     await pool.query(
-      `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO rota (id, name, lastName, day, startTime, endTime, wage, designation, Published) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Published')`,
       [uniqueId, name, lastName, day, startTimeWithSeconds, endTimeWithSeconds, 
-       wage || 0, designation || '']
+      wage || 0, designation || '']
     );
     
     return res.json({ 
