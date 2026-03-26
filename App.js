@@ -641,10 +641,16 @@ app.get("/employee/payslips", async (req, res) => {
       WHERE ${whereConditions.join(" AND ")}
     `;
     
-    const [countResult] = await pool.query(countQuery, queryParams);
+    const countResult = await new Promise((resolve, reject) => {
+      pool.query(countQuery, queryParams, (err, results) => {
+        if (err) reject(err);
+        else resolve(results);
+      });
+    });
+    
     const total = countResult[0].total;
     
-    // Get payslips with pagination - REMOVED fileType
+    // Get payslips with pagination
     const dataQuery = `
       SELECT 
         id, 
@@ -662,7 +668,12 @@ app.get("/employee/payslips", async (req, res) => {
       LIMIT ? OFFSET ?
     `;
     
-    const [rows] = await pool.query(dataQuery, [...queryParams, parseInt(limit), offset]);
+    const rows = await new Promise((resolve, reject) => {
+      pool.query(dataQuery, [...queryParams, parseInt(limit), offset], (err, results) => {
+        if (err) reject(err);
+        else resolve(results);
+      });
+    });
     
     // Format the response
     const payslips = rows.map(row => ({
@@ -673,7 +684,6 @@ app.get("/employee/payslips", async (req, res) => {
       month: row.Month,
       payslipNumber: row.payslip_number,
       uploadDate: row.date,
-      // Generate month display name
       monthDisplay: formatMonthDisplay(row.Month)
     }));
     
@@ -699,17 +709,6 @@ app.get("/employee/payslips", async (req, res) => {
   }
 });
 
-// Helper function to format month display
-function formatMonthDisplay(monthYear) {
-  if (!monthYear) return '';
-  const [year, month] = monthYear.split('-');
-  const monthNames = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'
-  ];
-  return `${monthNames[parseInt(month) - 1]} ${year}`;
-}
-
 // Get months with available payslips for dropdown
 app.get("/employee/payslip-months", async (req, res) => {
   const { db, email } = req.query;
@@ -724,13 +723,19 @@ app.get("/employee/payslip-months", async (req, res) => {
   try {
     const pool = getPool(db);
     
-    const [rows] = await pool.query(
-      `SELECT DISTINCT Month 
-       FROM payslips 
-       WHERE email = ? 
-       ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC`,
-      [email]
-    );
+    const rows = await new Promise((resolve, reject) => {
+      pool.query(
+        `SELECT DISTINCT Month 
+         FROM payslips 
+         WHERE email = ? 
+         ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC`,
+        [email],
+        (err, results) => {
+          if (err) reject(err);
+          else resolve(results);
+        }
+      );
+    });
     
     const months = rows.map(row => ({
       value: row.Month,
@@ -752,6 +757,17 @@ app.get("/employee/payslip-months", async (req, res) => {
   }
 });
 
+// Helper function to format month display
+function formatMonthDisplay(monthYear) {
+  if (!monthYear) return '';
+  const [year, month] = monthYear.split('-');
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  return `${monthNames[parseInt(month) - 1]} ${year}`;
+}
+
 // Download payslip for employee
 app.get("/employee/download-payslip/:id", async (req, res) => {
   const { db, email } = req.query;
@@ -767,13 +783,19 @@ app.get("/employee/download-payslip/:id", async (req, res) => {
   try {
     const pool = getPool(db);
     
-    // Verify this payslip belongs to the employee
-    const [rows] = await pool.promise().query(
-      'SELECT fileContent, name, lastName, Month, payslip_number FROM payslips WHERE id = ? AND email = ?',
-      [id, email]
-    );
+    // Use promise wrapper or callback
+    const rows = await new Promise((resolve, reject) => {
+      pool.query(
+        'SELECT fileContent, name, lastName, Month, payslip_number FROM payslips WHERE id = ? AND email = ?',
+        [id, email],
+        (err, results) => {
+          if (err) reject(err);
+          else resolve(results);
+        }
+      );
+    });
     
-    if (rows.length === 0) {
+    if (!rows || rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Payslip not found or unauthorized' });
     }
     
@@ -784,22 +806,25 @@ app.get("/employee/download-payslip/:id", async (req, res) => {
     let fileType = 'application/octet-stream';
     let fileExt = 'bin';
     
-    if (buffer.toString('ascii', 0, 4) === '%PDF') {
-      fileType = 'application/pdf';
-      fileExt = 'pdf';
-    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
-      fileType = 'image/jpeg';
-      fileExt = 'jpg';
-    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
-      fileType = 'image/png';
-      fileExt = 'png';
+    if (buffer && buffer.length > 0) {
+      const header = buffer.toString('ascii', 0, 4);
+      if (header === '%PDF') {
+        fileType = 'application/pdf';
+        fileExt = 'pdf';
+      } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+        fileType = 'image/jpeg';
+        fileExt = 'jpg';
+      } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+        fileType = 'image/png';
+        fileExt = 'png';
+      }
     }
     
     const fileName = `earnings_${payslip.name}_${payslip.lastName}_${payslip.Month}_${payslip.payslip_number}.${fileExt}`;
     
     res.setHeader('Content-Type', fileType);
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.send(payslip.fileContent);
+    res.send(buffer);
     
   } catch (error) {
     console.error('Error downloading payslip:', error);
@@ -822,13 +847,19 @@ app.get("/employee/view-payslip/:id", async (req, res) => {
   try {
     const pool = getPool(db);
     
-    // Verify this payslip belongs to the employee
-    const [rows] = await pool.promise().query(
-      'SELECT fileContent, Month, payslip_number FROM payslips WHERE id = ? AND email = ?',
-      [id, email]
-    );
+    // Use promise wrapper or callback
+    const rows = await new Promise((resolve, reject) => {
+      pool.query(
+        'SELECT fileContent, Month, payslip_number FROM payslips WHERE id = ? AND email = ?',
+        [id, email],
+        (err, results) => {
+          if (err) reject(err);
+          else resolve(results);
+        }
+      );
+    });
     
-    if (rows.length === 0) {
+    if (!rows || rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Payslip not found or unauthorized' });
     }
     
@@ -838,12 +869,15 @@ app.get("/employee/view-payslip/:id", async (req, res) => {
     // Detect file type from content
     let fileType = 'application/octet-stream';
     
-    if (buffer.toString('ascii', 0, 4) === '%PDF') {
-      fileType = 'application/pdf';
-    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
-      fileType = 'image/jpeg';
-    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
-      fileType = 'image/png';
+    if (buffer && buffer.length > 0) {
+      const header = buffer.toString('ascii', 0, 4);
+      if (header === '%PDF') {
+        fileType = 'application/pdf';
+      } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+        fileType = 'image/jpeg';
+      } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+        fileType = 'image/png';
+      }
     }
     
     res.json({
