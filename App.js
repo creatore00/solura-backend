@@ -611,7 +611,7 @@ app.post("/rota/add-direct", async (req, res) => {
 // ==================== PAYSLIPS ENDPOINTS ====================
 
 // Get payslips for logged-in employee with pagination and month filter
-app.get("/employee/payslips", (req, res) => {
+app.get("/employee/payslips", async (req, res) => {
   const { db, email, month, page = 1, limit = 10 } = req.query;
 
   console.log("=================================");
@@ -636,192 +636,95 @@ app.get("/employee/payslips", (req, res) => {
     const pool = getPool(db);
     console.log("✅ Got pool for database:", db);
     
-    // First, check if the payslips table exists
-    pool.query("SHOW TABLES LIKE 'payslips'", (err, tableResult) => {
-      if (err) {
-        console.error("❌ Error checking payslips table:", err);
-        return res.status(500).json({ 
-          success: false, 
-          message: "Database error checking table",
-          error: err.message 
-        });
-      }
-      
-      console.log("📊 Table check result:", tableResult);
-      
-      if (!tableResult || tableResult.length === 0) {
-        console.log("⚠️ payslips table does NOT exist!");
-        return res.json({
-          success: true,
-          payslips: [],
-          pagination: {
-            page: parseInt(page),
-            limit: parseInt(limit),
-            total: 0,
-            totalPages: 0,
-            hasMore: false
-          }
-        });
-      }
-      
-      console.log("✅ payslips table exists");
-      
-      // Check if there are any records for this email
-      pool.query("SELECT COUNT(*) as count FROM payslips WHERE email = ?", [email], (err, emailCheck) => {
-        if (err) {
-          console.error("❌ Error checking email:", err);
-          return res.status(500).json({ 
-            success: false, 
-            message: "Database error checking email",
-            error: err.message 
-          });
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    
+    // Build query conditions
+    let whereConditions = ["email = ?"];
+    let queryParams = [email];
+    
+    if (month) {
+      whereConditions.push("Month = ?");
+      queryParams.push(month);
+    }
+    
+    const whereClause = whereConditions.join(" AND ");
+    
+    // Get total count for pagination
+    const countQuery = `SELECT COUNT(*) as total FROM payslips WHERE ${whereClause}`;
+    console.log("📊 Count query:", countQuery);
+    console.log("📊 Count params:", queryParams);
+    
+    const [countResult] = await pool.query(countQuery, queryParams);
+    console.log("✅ Count result:", countResult);
+    
+    const total = countResult[0]?.total || 0;
+    console.log(`📊 Total payslips found: ${total}`);
+    
+    if (total === 0) {
+      return res.json({
+        success: true,
+        payslips: [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: 0,
+          totalPages: 0,
+          hasMore: false
         }
-        
-        console.log("📊 Email check result:", emailCheck);
-        
-        if (!emailCheck || emailCheck.length === 0 || emailCheck[0].count === 0) {
-          console.log("⚠️ No payslips found for this email");
-          return res.json({
-            success: true,
-            payslips: [],
-            pagination: {
-              page: parseInt(page),
-              limit: parseInt(limit),
-              total: 0,
-              totalPages: 0,
-              hasMore: false
-            }
-          });
-        }
-        
-        console.log(`✅ Found ${emailCheck[0].count} payslips for email`);
-        
-        const offset = (parseInt(page) - 1) * parseInt(limit);
-        
-        // Build query conditions
-        let whereConditions = ["email = ?"];
-        let queryParams = [email];
-        
-        if (month) {
-          whereConditions.push("Month = ?");
-          queryParams.push(month);
-        }
-        
-        const whereClause = whereConditions.join(" AND ");
-        
-        // Get total count for pagination
-        const countQuery = `SELECT COUNT(*) as total FROM payslips WHERE ${whereClause}`;
-        console.log("📊 Count query:", countQuery);
-        console.log("📊 Count params:", queryParams);
-        
-        pool.query(countQuery, queryParams, (err, countResult) => {
-          if (err) {
-            console.error("❌ Error counting payslips:", err);
-            return res.status(500).json({ 
-              success: false, 
-              message: "Database error counting payslips",
-              error: err.message 
-            });
-          }
-          
-          console.log("✅ Count result:", countResult);
-          
-          if (!countResult || countResult.length === 0) {
-            console.log("⚠️ No count result");
-            return res.json({
-              success: true,
-              payslips: [],
-              pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: 0,
-                totalPages: 0,
-                hasMore: false
-              }
-            });
-          }
-          
-          const total = countResult[0].total;
-          console.log(`📊 Total payslips after filter: ${total}`);
-          
-          if (total === 0) {
-            return res.json({
-              success: true,
-              payslips: [],
-              pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: 0,
-                totalPages: 0,
-                hasMore: false
-              }
-            });
-          }
-          
-          // Get payslips with pagination
-          const dataQuery = `
-            SELECT 
-              id, 
-              name, 
-              lastName, 
-              email, 
-              Month, 
-              payslip_number, 
-              date
-            FROM payslips 
-            WHERE ${whereClause}
-            ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC, 
-                     payslip_number ASC,
-                     date DESC
-            LIMIT ? OFFSET ?
-          `;
-          
-          const dataParams = [...queryParams, parseInt(limit), offset];
-          console.log("📊 Data query:", dataQuery);
-          console.log("📊 Data params:", dataParams);
-          
-          pool.query(dataQuery, dataParams, (err, rows) => {
-            if (err) {
-              console.error("❌ Error fetching payslips:", err);
-              return res.status(500).json({ 
-                success: false, 
-                message: "Database error fetching payslips",
-                error: err.message 
-              });
-            }
-            
-            console.log(`✅ Found ${rows.length} payslips in query`);
-            console.log("📊 First row sample:", rows[0]);
-            
-            // Format the response
-            const payslips = rows.map(row => ({
-              id: row.id,
-              name: row.name,
-              lastName: row.lastName,
-              email: row.email,
-              month: row.Month,
-              payslipNumber: row.payslip_number,
-              uploadDate: row.date,
-              monthDisplay: formatMonthDisplay(row.Month)
-            }));
-            
-            console.log("📊 Sending response with", payslips.length, "payslips");
-            
-            res.json({
-              success: true,
-              payslips: payslips,
-              pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: total,
-                totalPages: Math.ceil(total / parseInt(limit)),
-                hasMore: offset + payslips.length < total
-              }
-            });
-          });
-        });
       });
+    }
+    
+    // Get payslips with pagination
+    const dataQuery = `
+      SELECT 
+        id, 
+        name, 
+        lastName, 
+        email, 
+        Month, 
+        payslip_number, 
+        date
+      FROM payslips 
+      WHERE ${whereClause}
+      ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC, 
+               payslip_number ASC,
+               date DESC
+      LIMIT ? OFFSET ?
+    `;
+    
+    const dataParams = [...queryParams, parseInt(limit), offset];
+    console.log("📊 Data query:", dataQuery);
+    console.log("📊 Data params:", dataParams);
+    
+    const [rows] = await pool.query(dataQuery, dataParams);
+    console.log(`✅ Found ${rows.length} payslips`);
+    
+    // Format the response
+    const payslips = rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      lastName: row.lastName,
+      email: row.email,
+      month: row.Month,
+      payslipNumber: row.payslip_number,
+      uploadDate: row.date,
+      monthDisplay: formatMonthDisplay(row.Month)
+    }));
+    
+    console.log("📊 Sending response with", payslips.length, "payslips");
+    
+    res.json({
+      success: true,
+      payslips: payslips,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: total,
+        totalPages: Math.ceil(total / parseInt(limit)),
+        hasMore: offset + payslips.length < total
+      }
     });
+    
   } catch (error) {
     console.error("❌ Exception in /employee/payslips:", error);
     res.status(500).json({ 
@@ -833,7 +736,7 @@ app.get("/employee/payslips", (req, res) => {
 });
 
 // Get months with available payslips for dropdown
-app.get("/employee/payslip-months", (req, res) => {
+app.get("/employee/payslip-months", async (req, res) => {
   const { db, email } = req.query;
 
   console.log("=================================");
@@ -855,71 +758,29 @@ app.get("/employee/payslip-months", (req, res) => {
     const pool = getPool(db);
     console.log("✅ Got pool for database:", db);
     
-    // First check if table exists
-    pool.query("SHOW TABLES LIKE 'payslips'", (err, tableResult) => {
-      if (err) {
-        console.error("❌ Error checking payslips table:", err);
-        return res.status(500).json({ 
-          success: false, 
-          message: "Database error",
-          error: err.message 
-        });
-      }
-      
-      console.log("📊 Table exists check:", tableResult);
-      
-      if (!tableResult || tableResult.length === 0) {
-        console.log("⚠️ payslips table does NOT exist!");
-        return res.json({
-          success: true,
-          months: []
-        });
-      }
-      
-      console.log("✅ payslips table exists");
-      
-      // First, let's see all months in the table (for debugging)
-      pool.query("SELECT DISTINCT Month FROM payslips LIMIT 10", (err, allMonths) => {
-        if (err) {
-          console.error("❌ Error fetching all months:", err);
-        } else {
-          console.log("📊 All months in table:", allMonths);
-        }
-      });
-      
-      const query = `
-        SELECT DISTINCT Month 
-        FROM payslips 
-        WHERE email = ? 
-        ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC
-      `;
-      console.log("📊 Query:", query);
-      console.log("📊 Email param:", email);
-      
-      pool.query(query, [email], (err, rows) => {
-        if (err) {
-          console.error("❌ Error fetching payslip months:", err);
-          return res.status(500).json({ 
-            success: false, 
-            message: "Database error",
-            error: err.message 
-          });
-        }
-        
-        console.log(`✅ Found ${rows.length} months`);
-        console.log("📊 Months data:", rows);
-        
-        const months = rows.map(row => ({
-          value: row.Month,
-          display: formatMonthDisplay(row.Month)
-        }));
-        
-        res.json({
-          success: true,
-          months: months
-        });
-      });
+    const query = `
+      SELECT DISTINCT Month 
+      FROM payslips 
+      WHERE email = ? 
+      ORDER BY STR_TO_DATE(CONCAT(Month, '-01'), '%Y-%m-%d') DESC
+    `;
+    console.log("📊 Query:", query);
+    console.log("📊 Email param:", email);
+    
+    const [rows] = await pool.query(query, [email]);
+    console.log(`✅ Found ${rows.length} months`);
+    console.log("📊 Months data:", rows);
+    
+    const months = rows.map(row => ({
+      value: row.Month,
+      display: formatMonthDisplay(row.Month)
+    }));
+    
+    res.json({
+      success: true,
+      months: months
     });
+    
   } catch (error) {
     console.error("❌ Exception in /employee/payslip-months:", error);
     res.status(500).json({ 
@@ -942,7 +803,7 @@ function formatMonthDisplay(monthYear) {
 }
 
 // Download payslip for employee
-app.get("/employee/download-payslip/:id", (req, res) => {
+app.get("/employee/download-payslip/:id", async (req, res) => {
   const { db, email } = req.query;
   const { id } = req.params;
 
@@ -970,56 +831,51 @@ app.get("/employee/download-payslip/:id", (req, res) => {
     console.log("📊 Query:", query);
     console.log("📊 Params:", [id, email]);
     
-    pool.query(query, [id, email], (err, rows) => {
-      if (err) {
-        console.error("❌ Error downloading payslip:", err);
-        return res.status(500).json({ success: false, message: "Database error: " + err.message });
-      }
-      
-      console.log(`✅ Query result rows: ${rows ? rows.length : 0}`);
-      
-      if (!rows || rows.length === 0) {
-        console.log("❌ No payslip found or unauthorized");
-        return res.status(404).json({ success: false, message: 'Payslip not found or unauthorized' });
-      }
-      
-      const payslip = rows[0];
-      const buffer = payslip.fileContent;
-      
-      if (!buffer || buffer.length === 0) {
-        console.log("❌ File content is empty");
-        return res.status(404).json({ success: false, message: 'File content is empty' });
-      }
-      
-      console.log(`✅ File content size: ${buffer.length} bytes`);
-      
-      // Detect file type from content
-      let fileType = 'application/octet-stream';
-      let fileExt = 'bin';
-      
-      const header = buffer.toString('ascii', 0, 4);
-      if (header === '%PDF') {
-        fileType = 'application/pdf';
-        fileExt = 'pdf';
-        console.log("📄 Detected PDF file");
-      } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
-        fileType = 'image/jpeg';
-        fileExt = 'jpg';
-        console.log("🖼️ Detected JPEG image");
-      } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
-        fileType = 'image/png';
-        fileExt = 'png';
-        console.log("🖼️ Detected PNG image");
-      }
-      
-      const fileName = `earnings_${payslip.name}_${payslip.lastName}_${payslip.Month}_${payslip.payslip_number}.${fileExt}`;
-      console.log(`📁 Filename: ${fileName}`);
-      
-      res.setHeader('Content-Type', fileType);
-      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-      res.send(buffer);
-      console.log("✅ File sent successfully");
-    });
+    const [rows] = await pool.query(query, [id, email]);
+    console.log(`✅ Query result rows: ${rows ? rows.length : 0}`);
+    
+    if (!rows || rows.length === 0) {
+      console.log("❌ No payslip found or unauthorized");
+      return res.status(404).json({ success: false, message: 'Payslip not found or unauthorized' });
+    }
+    
+    const payslip = rows[0];
+    const buffer = payslip.fileContent;
+    
+    if (!buffer || buffer.length === 0) {
+      console.log("❌ File content is empty");
+      return res.status(404).json({ success: false, message: 'File content is empty' });
+    }
+    
+    console.log(`✅ File content size: ${buffer.length} bytes`);
+    
+    // Detect file type from content
+    let fileType = 'application/octet-stream';
+    let fileExt = 'bin';
+    
+    const header = buffer.toString('ascii', 0, 4);
+    if (header === '%PDF') {
+      fileType = 'application/pdf';
+      fileExt = 'pdf';
+      console.log("📄 Detected PDF file");
+    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+      fileType = 'image/jpeg';
+      fileExt = 'jpg';
+      console.log("🖼️ Detected JPEG image");
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+      fileType = 'image/png';
+      fileExt = 'png';
+      console.log("🖼️ Detected PNG image");
+    }
+    
+    const fileName = `earnings_${payslip.name}_${payslip.lastName}_${payslip.Month}_${payslip.payslip_number}.${fileExt}`;
+    console.log(`📁 Filename: ${fileName}`);
+    
+    res.setHeader('Content-Type', fileType);
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(buffer);
+    console.log("✅ File sent successfully");
+    
   } catch (error) {
     console.error("❌ Exception in download-payslip:", error);
     res.status(500).json({ success: false, message: 'Server error: ' + error.message });
