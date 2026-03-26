@@ -4,6 +4,8 @@ import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { pool } from "./config/db.js"; // only for login users table
 import { getPool } from "./config/dbManager.js";
+import cron from 'node-cron';
+import moment from 'moment-timezone'; 
 import fs from 'fs';
 
 dotenv.config();
@@ -189,6 +191,100 @@ function formatDate(dateString) {
     return dateString;
   }
 }
+
+// ==================== MISSING SHIFTS CONFIRMATION ====================
+
+// Function to send missing published notification
+async function sendMissingPublishedNotification(dbName, missingEmployees) {
+  const pool = getPool(dbName);
+  const count = missingEmployees.length;
+  
+  let title, message;
+  if (count === 1) {
+    const emp = missingEmployees[0];
+    title = `⚠️ Shift Not Updated`;
+    message = `${emp.name} ${emp.lastName} didn't update their shift for today.`;
+  } else if (count === 2) {
+    const emp1 = missingEmployees[0];
+    const emp2 = missingEmployees[1];
+    title = `⚠️ Shifts Not Updated (2 employees)`;
+    message = `${emp1.name} ${emp1.lastName} and ${emp2.name} ${emp2.lastName} didn't update their shifts for today.`;
+  } else {
+    title = `⚠️ Multiple Shifts Not Updated`;
+    message = `${count} staff members didn't update their shifts for today.`;
+  }
+
+  // Insert notification for AM and Manager roles
+  const roles = ['AM', 'Manager', 'Assistant Manager'];
+  for (const role of roles) {
+    await pool.query(
+      `INSERT INTO Notifications (targetRole, title, message, type, isRead, createdAt, authorEmail)
+       VALUES (?, ?, ?, 'SYSTEM', 0, NOW(), 'system@solura.com')`,
+      [role, title, message]
+    );
+  }
+  console.log(`📢 Sent missing published notifications to ${roles.join(', ')} in ${dbName}`);
+}
+
+// Scheduled job: every day at 23:59 UK time
+cron.schedule('59 23 * * *', async () => {
+  console.log('🕛 Running missing published check (23:59 UK time)');
+  try {
+    // Get all distinct database names from users table
+    const [databases] = await pool.query('SELECT DISTINCT db_name FROM users WHERE db_name IS NOT NULL AND db_name != ""');
+    const today = moment.tz('Europe/London');
+    const todayFormatted = today.format('DD/MM/YYYY (dddd)'); // e.g., "15/03/2026 (Sunday)"
+    
+    for (const { db_name } of databases) {
+      const dbPool = getPool(db_name);
+      try {
+        const [rows] = await dbPool.query(
+          `SELECT DISTINCT name, lastName FROM rota 
+           WHERE day = ? AND (Published IS NULL OR Published = '')
+           ORDER BY lastName, name`,
+          [todayFormatted]
+        );
+        if (rows.length > 0) {
+          await sendMissingPublishedNotification(db_name, rows);
+        }
+      } catch (err) {
+        console.error(`Error processing db ${db_name}:`, err);
+      }
+    }
+  } catch (err) {
+    console.error('Error in missing published cron job:', err);
+  }
+}, {
+  timezone: 'Europe/London'
+});
+
+// Endpoint to get missing published shifts for a given day
+app.get('/api/missing-published', async (req, res) => {
+  const { db, day } = req.query;
+  if (!db || !day) {
+    return res.status(400).json({ success: false, message: 'db and day are required' });
+  }
+
+  try {
+    const pool = getPool(db);
+    // Convert YYYY-MM-DD to "dd/mm/yyyy (Day)"
+    const date = moment.tz(day, 'Europe/London');
+    const formattedDay = date.format('DD/MM/YYYY (dddd)');
+    
+    const [rows] = await pool.query(
+      `SELECT name, lastName, startTime, endTime, day
+       FROM rota
+       WHERE day = ? AND (Published IS NULL OR Published = '')
+       ORDER BY lastName, name`,
+      [formattedDay]
+    );
+    
+    res.json({ success: true, missing: rows });
+  } catch (error) {
+    console.error('Error fetching missing published:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
 
 // ==================== SHIFTS REQUESTS ====================
 
