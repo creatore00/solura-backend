@@ -3601,8 +3601,10 @@ app.post("/save-shift", async (req, res) => {
       // UPDATE existing shift - set ConfirmedByTM to 'yes'
       await pool.query(
         `UPDATE rota 
-         SET startTime = ?, endTime = ?, wage = ?, designation = ?, ConfirmedByTM = 'yes'
-         WHERE id = ?`,
+        SET startTime = ?, endTime = ?, wage = ?, designation = ?, 
+            ConfirmedByTM = 'yes',
+            Published = 'Published'
+        WHERE id = ?`,
         [startTimeWithSeconds, endTimeWithSeconds, wage || 0, designation || '', entryId]
       );
       
