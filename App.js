@@ -2955,7 +2955,7 @@ app.get("/rota", async (req, res) => {
   }
 });
 
-// Get all rota entries for a specific week with designation
+// Get all rota entries for a specific week with designation (only published shifts)
 app.get("/all-rota", async (req, res) => {
   const { db, startDate, endDate } = req.query;
   
@@ -2993,7 +2993,8 @@ app.get("/all-rota", async (req, res) => {
         COALESCE(e.designation, 'Unknown') as designation
       FROM rota r
       LEFT JOIN Employees e ON r.name = e.name AND r.lastName = e.lastName
-      WHERE STR_TO_DATE(SUBSTRING_INDEX(r.day, ' (', 1), '%d/%m/%Y') 
+      WHERE r.Published = 'Published'
+        AND STR_TO_DATE(SUBSTRING_INDEX(r.day, ' (', 1), '%d/%m/%Y') 
             BETWEEN ? AND ?
       ORDER BY 
         CASE WHEN COALESCE(e.designation, '') = 'BOH' THEN 1 
