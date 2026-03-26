@@ -806,15 +806,7 @@ function formatMonthDisplay(monthYear) {
 app.get("/employee/download-payslip/:id", async (req, res) => {
   const { db, email } = req.query;
   const { id } = req.params;
-
-  console.log("=================================");
-  console.log("📥 DOWNLOAD PAYSLIP - Request received");
-  console.log("=================================");
-  console.log("db:", db);
-  console.log("email:", email);
-  console.log("id:", id);
-  console.log("=================================");
-
+  
   if (!db || !email || !id) {
     console.log("❌ Missing db, email, or id");
     return res.status(400).json({ 
@@ -848,31 +840,50 @@ app.get("/employee/download-payslip/:id", async (req, res) => {
     }
     
     console.log(`✅ File content size: ${buffer.length} bytes`);
+    console.log(`✅ First few bytes: ${buffer.slice(0, 10).toString('hex')}`);
     
     // Detect file type from content
     let fileType = 'application/octet-stream';
     let fileExt = 'bin';
     
-    const header = buffer.toString('ascii', 0, 4);
-    if (header === '%PDF') {
-      fileType = 'application/pdf';
-      fileExt = 'pdf';
-      console.log("📄 Detected PDF file");
-    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
-      fileType = 'image/jpeg';
-      fileExt = 'jpg';
-      console.log("🖼️ Detected JPEG image");
-    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+    // Check for PNG
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
       fileType = 'image/png';
       fileExt = 'png';
       console.log("🖼️ Detected PNG image");
     }
+    // Check for JPEG
+    else if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+      fileType = 'image/jpeg';
+      fileExt = 'jpg';
+      console.log("🖼️ Detected JPEG image");
+    }
+    // Check for PDF
+    else if (buffer.toString('ascii', 0, 4) === '%PDF') {
+      fileType = 'application/pdf';
+      fileExt = 'pdf';
+      console.log("📄 Detected PDF file");
+    }
+    // Check for GIF (if needed)
+    else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
+      fileType = 'image/gif';
+      fileExt = 'gif';
+      console.log("🖼️ Detected GIF image");
+    }
+    // Check for WebP (if needed)
+    else if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) {
+      fileType = 'image/webp';
+      fileExt = 'webp';
+      console.log("🖼️ Detected WebP image");
+    }
     
     const fileName = `earnings_${payslip.name}_${payslip.lastName}_${payslip.Month}_${payslip.payslip_number}.${fileExt}`;
     console.log(`📁 Filename: ${fileName}`);
+    console.log(`📁 Content-Type: ${fileType}`);
     
     res.setHeader('Content-Type', fileType);
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Length', buffer.length);
     res.send(buffer);
     console.log("✅ File sent successfully");
     
